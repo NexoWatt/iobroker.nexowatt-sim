@@ -106,6 +106,17 @@ class NexowattSimAdapter extends utils.Adapter {
         this._rng = new LcgRandom(1337);
         this._lastTickMs = null;
 
+        this._cfg = null; // normalized adapter config
+        this._scenario = {
+            selected: 'baseline',
+            active: 'baseline',
+            running: false,
+            started_ms: 0,
+            phase: 'idle',
+            status: 'idle',
+            last_applied: '',
+        };
+
         this._model = null;
         this._cache = new Map(); // id -> last value for reducing updates
 
@@ -138,12 +149,17 @@ class NexowattSimAdapter extends utils.Adapter {
                 defaultTargetSocPct: clamp(this.config.defaultTargetSocPct ?? 100, 0, 100),
             };
 
+            this._cfg = cfg;
+
             this._rng = new LcgRandom(cfg.randomSeed);
 
             this.log.info(`Starting simulator with ${cfg.chargersCount} EVCS, interval=${cfg.updateIntervalMs}ms`);
 
             await this._createObjects(cfg);
             await this._initModel(cfg);
+
+            // Scenario catalog & defaults
+            await this._initScenarioStates();
 
             // Subscribe to commands and manual overrides
             await this.subscribeStatesAsync('*.ctrl.*');
@@ -152,6 +168,7 @@ class NexowattSimAdapter extends utils.Adapter {
             await this.subscribeStatesAsync('pv.*');
             await this.subscribeStatesAsync('storage.*');
             await this.subscribeStatesAsync('tariff.*');
+            await this.subscribeStatesAsync('scenario.*');
 
             // Mark connection
             await this.setStateAsync('info.connection', { val: true, ack: true });
@@ -179,6 +196,13 @@ class NexowattSimAdapter extends utils.Adapter {
             if (state.ack) return;
 
             const rel = id.replace(this.namespace + '.', '');
+
+            // Scenario controls are handled asynchronously (buttons, selection)
+            if (rel.startsWith('scenario.')) {
+                await this._handleScenarioStateWrite(rel, state.val);
+                return;
+            }
+
             // Apply and ACK
             const applied = this._applyWrite(rel, state.val);
             if (applied) {
@@ -227,6 +251,14 @@ class NexowattSimAdapter extends utils.Adapter {
         }
         if (relId === 'pv.weather_factor') {
             this._model.pv.weather_factor = clamp(value, 0, 1);
+            return true;
+        }
+        if (relId === 'pv.override.enabled') {
+            this._model.pv.override.enabled = !!value;
+            return true;
+        }
+        if (relId === 'pv.override.power_kw') {
+            this._model.pv.override.power_kw = clamp(value, 0, 100000);
             return true;
         }
 
@@ -340,10 +372,588 @@ class NexowattSimAdapter extends utils.Adapter {
         return false;
     }
 
+    // ---------------------------------------------------------------------
+    // Scenario / Test modes
+    // ---------------------------------------------------------------------
+
+    _scenarioDefinitions() {
+        // Keep the catalog compact but descriptive, so it can be shown in Admin as JSON.
+        return [
+            {
+                id: 'baseline',
+                title: 'Baseline / Reset',
+                kind: 'oneshot',
+                description: 'Resets the simulator to adapter defaults (grid/PV/storage) and clears EV sessions.',
+            },
+            {
+                id: 'lm_6cars_deadline_0615',
+                title: 'Lastmanagement: 6 Cars, Deadline 06:15',
+                kind: 'oneshot',
+                description: '40 kW grid, 6 sessions with different SoC, target 100%, departure 06:15. PV off (night).',
+            },
+            {
+                id: 'lm_20mix_deadline_0615',
+                title: 'Lastmanagement: 20 Mixed Chargers, Deadline 06:15',
+                kind: 'oneshot',
+                description: '40 kW grid, 20 sessions across AC 11/22 kW and DC, target 100%, departure 06:15. PV off.',
+            },
+            {
+                id: 'pv_surplus_30cars',
+                title: 'PV Surplus: 30 Cars + Forced PV Power',
+                kind: 'oneshot',
+                description: 'Forces PV power (override) to create surplus. 30 sessions, target 100%, departure 17:00.',
+            },
+            {
+                id: 'grid_limit_drop_timeline',
+                title: 'Timeline: Grid Limit Drop (80 -> 25 kW)',
+                kind: 'timeline',
+                duration_s: 240,
+                description: 'Starts at 80 kW, after 60 s drops to 25 kW for 120 s, then restores to 80 kW.',
+            },
+            {
+                id: 'tariff_pulse_timeline',
+                title: 'Timeline: Tariff Pulse (low/high/low)',
+                kind: 'timeline',
+                duration_s: 180,
+                description: 'Manual price: 10 ct/kWh (0-60s), 120 ct/kWh (60-120s), 10 ct/kWh (120-180s).',
+            },
+            {
+                id: 'grid_blackout_60s_timeline',
+                title: 'Timeline: Grid Blackout 60s',
+                kind: 'timeline',
+                duration_s: 150,
+                description: 'Grid available=false from 30s to 90s, then recovers. Useful for failover tests.',
+            },
+            {
+                id: 'dc_rush_10',
+                title: 'DC Stress: 10 DC Sessions (Fast-Charge Rush)',
+                kind: 'oneshot',
+                description: 'Plugs up to 10 DC charge points, low SoC, target 80%. High grid limit for stress testing.',
+            },
+        ];
+    }
+
+    _normalizeScenarioId(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return 'baseline';
+        const id = raw.replace(/\s+/g, '_');
+        const known = new Set(this._scenarioDefinitions().map(s => s.id));
+        return known.has(id) ? id : 'baseline';
+    }
+
+    async _initScenarioStates() {
+        try {
+            const sel = await this.getStateAsync('scenario.selected');
+            this._scenario.selected = this._normalizeScenarioId(sel?.val ?? 'baseline');
+            this._scenario.active = this._scenario.selected;
+            this._scenario.running = false;
+            this._scenario.started_ms = 0;
+            this._scenario.phase = 'idle';
+            this._scenario.status = 'idle';
+
+            const catalog = this._scenarioDefinitions();
+            await this.setStateAsync('scenario.catalog_json', { val: JSON.stringify(catalog, null, 2), ack: true });
+            await this.setStateAsync('scenario.selected', { val: this._scenario.selected, ack: true });
+
+            await this._publishScenarioStates();
+        } catch (err) {
+            this.log.warn(`initScenarioStates failed: ${err?.message || err}`);
+        }
+    }
+
+    async _handleScenarioStateWrite(relId, value) {
+        try {
+            if (relId === 'scenario.selected') {
+                const normalized = this._normalizeScenarioId(value);
+                this._scenario.selected = normalized;
+                await this.setStateAsync(relId, { val: normalized, ack: true });
+                this._scenario.status = `selected=${normalized}`;
+                await this._publishScenarioStates();
+                return;
+            }
+
+            // Quick scenario button: one click triggers the respective scenario
+            if (relId.startsWith('scenario.buttons.')) {
+                const isPressed = value === true || value === 1 || value === 'true';
+                await this.setStateAsync(relId, { val: value, ack: true });
+                if (!isPressed) return;
+
+                const scenarioId = this._normalizeScenarioId(relId.substring('scenario.buttons.'.length));
+                const def = this._scenarioDefinitions().find(s => s.id === scenarioId);
+                const start = def?.kind === 'timeline';
+                await this._applyScenario(scenarioId, { start });
+
+                // Auto-reset button to false so it can be clicked again
+                await this.setStateAsync(relId, { val: false, ack: true });
+                return;
+            }
+
+            // Button handling (momentary)
+            const isPressed = value === true || value === 1 || value === 'true';
+            await this.setStateAsync(relId, { val: value, ack: true });
+            if (!isPressed) return;
+
+            if (relId === 'scenario.ctrl.apply') {
+                await this._applyScenario(this._scenario.selected, { start: false });
+            } else if (relId === 'scenario.ctrl.start') {
+                await this._applyScenario(this._scenario.selected, { start: true });
+            } else if (relId === 'scenario.ctrl.stop') {
+                await this._stopScenario('user');
+            } else if (relId === 'scenario.ctrl.reset') {
+                await this._applyScenario('baseline', { start: false });
+            } else {
+                // unknown scenario control -> just ack
+            }
+
+            // Auto-reset button to false so it can be clicked again
+            await this.setStateAsync(relId, { val: false, ack: true });
+        } catch (err) {
+            this.log.warn(`scenario write handler error (${relId}): ${err?.message || err}`);
+        }
+    }
+
+    async _publishScenarioStates() {
+        const elapsed = (this._scenario.running && this._scenario.started_ms) ? ((Date.now() - this._scenario.started_ms) / 1000) : 0;
+        await this._setChanged('scenario.selected', this._scenario.selected);
+        await this._setChanged('scenario.active', this._scenario.active);
+        await this._setChanged('scenario.running', this._scenario.running);
+        await this._setChanged('scenario.phase', this._scenario.phase);
+        await this._setChanged('scenario.elapsed_s', Number(elapsed.toFixed(1)));
+        await this._setChanged('scenario.status', this._scenario.status);
+    }
+
+    async _applyScenario(scenarioId, { start } = { start: false }) {
+        if (!this._model || !this._cfg) {
+            this._scenario.status = 'model not ready';
+            await this._publishScenarioStates();
+            return;
+        }
+
+        const id = this._normalizeScenarioId(scenarioId);
+        const nowMs = Date.now();
+
+        // Keep selection in sync with the last applied scenario (helps in Admin)
+        this._scenario.selected = id;
+
+        // Stop any running scenario first
+        this._scenario.running = false;
+        this._scenario.started_ms = 0;
+        this._scenario.phase = 'applying';
+        this._scenario.status = `applying ${id}`;
+
+        // Apply (one-shot) configuration
+        switch (id) {
+            case 'baseline':
+                this._resetToDefaultsModel();
+                break;
+            case 'lm_6cars_deadline_0615':
+                this._scenarioLm6CarsDeadline();
+                break;
+            case 'lm_20mix_deadline_0615':
+                this._scenarioLm20MixedDeadline();
+                break;
+            case 'pv_surplus_30cars':
+                this._scenarioPvSurplus30Cars();
+                break;
+            case 'grid_limit_drop_timeline':
+                this._scenarioGridLimitDropTimelineSetup();
+                break;
+            case 'tariff_pulse_timeline':
+                this._scenarioTariffPulseTimelineSetup();
+                break;
+            case 'grid_blackout_60s_timeline':
+                this._scenarioGridBlackoutTimelineSetup();
+                break;
+            case 'dc_rush_10':
+                this._scenarioDcRush10();
+                break;
+            default:
+                this._resetToDefaultsModel();
+                break;
+        }
+
+        // Activate
+        this._scenario.active = id;
+        this._scenario.last_applied = new Date(nowMs).toISOString();
+
+        if (start) {
+            this._scenario.running = true;
+            this._scenario.started_ms = nowMs;
+            this._scenario.phase = 'running';
+            this._scenario.status = `running ${id}`;
+        } else {
+            this._scenario.running = false;
+            this._scenario.started_ms = 0;
+            this._scenario.phase = 'applied';
+            this._scenario.status = `applied ${id}`;
+        }
+
+        await this._publishScenarioStates();
+    }
+
+    async _stopScenario(reason = 'user') {
+        this._scenario.running = false;
+        this._scenario.started_ms = 0;
+        this._scenario.phase = 'stopped';
+        this._scenario.status = `stopped (${reason})`;
+        await this._publishScenarioStates();
+    }
+
+    _resetToDefaultsModel() {
+        const cfg = this._cfg;
+        if (!cfg || !this._model) return;
+
+        // Grid
+        this._model.grid.available = true;
+        this._model.grid.limit_kw = cfg.gridLimitKw;
+        this._model.grid.base_load_kw = cfg.baseLoadKw;
+
+        // Tariff
+        this._model.tariff.mode = 'auto';
+        // Keep current price as-is; tick will update
+
+        // PV
+        this._model.pv.installed_kwp = cfg.pvInstalledKwp;
+        this._model.pv.weather_factor = cfg.pvWeatherFactor;
+        this._model.pv.override.enabled = false;
+        this._model.pv.override.power_kw = 0;
+
+        // Storage
+        this._model.storage.capacity_kwh = cfg.storageCapacityKwh;
+        this._model.storage.max_charge_kw = cfg.storageMaxChargeKw;
+        this._model.storage.max_discharge_kw = cfg.storageMaxDischargeKw;
+        this._model.storage.soc_pct = cfg.storageInitialSocPct;
+        this._model.storage.ctrl.enabled = true;
+        this._model.storage.ctrl.power_set_kw = 0;
+
+        // Flex devices off
+        for (const dev of ['heatpump', 'chp', 'generator']) {
+            this._model[dev].ctrl.enabled = false;
+            this._model[dev].ctrl.power_set_kw = 0;
+        }
+
+        // EVCS reset
+        const now = new Date();
+        for (let i = 0; i < this._model.evcs.chargers.length; i++) {
+            const ch = this._model.evcs.chargers[i];
+            const autoPlug = cfg.autoConnectEnabled && (i + 1) <= cfg.autoConnectCount;
+
+            ch.ctrl.plugged = autoPlug;
+            ch.ctrl.enabled = autoPlug;
+            ch.ctrl.limit_kw = ch.max_kw;
+            ch.ctrl.priority = 5;
+
+            ch.vehicle.soc_pct = clamp(10 + 60 * this._rng.next(), 0, 100);
+            ch.vehicle.capacity_kwh = clamp(40 + 50 * this._rng.next(), 1, 1000);
+            ch.vehicle.max_charge_kw = ch.max_kw;
+            ch.vehicle.target_soc_pct = cfg.defaultTargetSocPct;
+            ch.vehicle.departure_time = cfg.defaultDepartureTime;
+            ch.vehicle.departure_ts = parseDepartureToTimestamp(ch.vehicle.departure_time, now);
+
+            ch.meas.power_kw = 0;
+            ch.meas.energy_kwh = 0;
+            ch.meas.status = autoPlug ? 'Preparing' : 'Available';
+        }
+    }
+
+    _plugCharger(id, { soc_pct, capacity_kwh, target_soc_pct, departure_time, priority } = {}) {
+        const ch = this._model.evcs.chargers.find(c => c.id === id);
+        if (!ch) return;
+        const now = new Date();
+        ch.ctrl.plugged = true;
+        ch.ctrl.enabled = true;
+        ch.ctrl.limit_kw = ch.max_kw;
+        if (priority !== undefined) ch.ctrl.priority = clamp(priority, 1, 10);
+
+        if (soc_pct !== undefined) ch.vehicle.soc_pct = clamp(soc_pct, 0, 100);
+        if (capacity_kwh !== undefined) ch.vehicle.capacity_kwh = clamp(capacity_kwh, 1, 1000);
+        ch.vehicle.max_charge_kw = ch.max_kw;
+        if (target_soc_pct !== undefined) ch.vehicle.target_soc_pct = clamp(target_soc_pct, 0, 100);
+        if (departure_time !== undefined) ch.vehicle.departure_time = String(departure_time);
+        ch.vehicle.departure_ts = parseDepartureToTimestamp(ch.vehicle.departure_time, now);
+
+        ch.meas.power_kw = 0;
+        ch.meas.energy_kwh = 0;
+        ch.meas.status = 'Preparing';
+    }
+
+    _unplugAllChargers() {
+        for (const ch of this._model.evcs.chargers) {
+            ch.ctrl.plugged = false;
+            ch.ctrl.enabled = false;
+            ch.meas.power_kw = 0;
+            ch.meas.energy_kwh = 0;
+            ch.meas.status = 'Available';
+        }
+    }
+
+    _scenarioLm6CarsDeadline() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+
+        // Grid constraint (example: 40 kW house connection)
+        this._model.grid.limit_kw = 40;
+        this._model.grid.base_load_kw = 8;
+        this._model.grid.available = true;
+
+        // Night: PV off
+        this._model.pv.installed_kwp = 0;
+        this._model.pv.override.enabled = false;
+
+        // Storage default size
+        this._model.storage.capacity_kwh = 200;
+        this._model.storage.max_charge_kw = 200;
+        this._model.storage.max_discharge_kw = 200;
+        this._model.storage.soc_pct = 60;
+        this._model.storage.ctrl.enabled = true;
+        this._model.storage.ctrl.power_set_kw = 0;
+
+        const ids = ['c01', 'c02', 'c03', 'c04', 'c05', 'c06'];
+        const socs = [20, 35, 10, 50, 25, 15];
+        for (let i = 0; i < ids.length; i++) {
+            if (i >= this._model.evcs.chargers.length) break;
+            this._plugCharger(ids[i], {
+                soc_pct: socs[i] ?? 20,
+                capacity_kwh: 60,
+                target_soc_pct: 100,
+                departure_time: '06:15',
+                priority: i === 0 ? 10 : 5,
+            });
+        }
+    }
+
+    _scenarioLm20MixedDeadline() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+
+        this._model.grid.limit_kw = 40;
+        this._model.grid.base_load_kw = 10;
+        this._model.grid.available = true;
+
+        // Night: PV off
+        this._model.pv.installed_kwp = 0;
+        this._model.pv.override.enabled = false;
+
+        // Mix across AC11 (c01..), AC22 (c26..), DC (c41..)
+        const ids = [];
+        for (let i = 1; i <= 10; i++) ids.push(`c${pad2(i)}`); // AC11
+        for (let i = 26; i <= 30; i++) ids.push(`c${pad2(i)}`); // AC22
+        for (let i = 41; i <= 45; i++) ids.push(`c${pad2(i)}`); // DC mix
+
+        const list = ids.filter(cid => {
+            const num = Number(cid.slice(1));
+            return num >= 1 && num <= this._model.evcs.chargers.length;
+        });
+
+        for (let i = 0; i < list.length; i++) {
+            const soc = clamp(10 + 60 * this._rng.next(), 0, 100);
+            const cap = clamp(50 + 40 * this._rng.next(), 1, 1000);
+            this._plugCharger(list[i], {
+                soc_pct: soc,
+                capacity_kwh: cap,
+                target_soc_pct: 100,
+                departure_time: '06:15',
+                priority: i < 3 ? 9 : 5,
+            });
+        }
+    }
+
+    _scenarioPvSurplus30Cars() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+
+        // More headroom
+        this._model.grid.limit_kw = 200;
+        this._model.grid.base_load_kw = 30;
+
+        // Force PV power for quick tests independent of actual time
+        this._model.pv.installed_kwp = Math.max(600, this._model.pv.installed_kwp);
+        this._model.pv.override.enabled = true;
+        this._model.pv.override.power_kw = 450;
+
+        // 30 sessions (take first 30 charge points)
+        const count = Math.min(30, this._model.evcs.chargers.length);
+        for (let i = 1; i <= count; i++) {
+            const cid = `c${pad2(i)}`;
+            this._plugCharger(cid, {
+                soc_pct: clamp(10 + 50 * this._rng.next(), 0, 100),
+                capacity_kwh: clamp(50 + 40 * this._rng.next(), 1, 1000),
+                target_soc_pct: 100,
+                departure_time: '17:00',
+                priority: 5,
+            });
+        }
+
+        // Cheap price (optional)
+        this._model.tariff.mode = 'manual';
+        this._model.tariff.price_ct_per_kwh = 10;
+    }
+
+    _scenarioGridLimitDropTimelineSetup() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+        this._model.grid.limit_kw = 80;
+        this._model.grid.base_load_kw = 10;
+        this._model.grid.available = true;
+
+        // Plug 12 sessions
+        const count = Math.min(12, this._model.evcs.chargers.length);
+        for (let i = 1; i <= count; i++) {
+            this._plugCharger(`c${pad2(i)}`, {
+                soc_pct: clamp(10 + 60 * this._rng.next(), 0, 100),
+                capacity_kwh: 60,
+                target_soc_pct: 100,
+                departure_time: '06:15',
+            });
+        }
+    }
+
+    _scenarioTariffPulseTimelineSetup() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+        this._model.grid.limit_kw = 60;
+        this._model.grid.base_load_kw = 8;
+
+        // Plug 6 sessions
+        for (let i = 1; i <= Math.min(6, this._model.evcs.chargers.length); i++) {
+            this._plugCharger(`c${pad2(i)}`, {
+                soc_pct: clamp(10 + 40 * this._rng.next(), 0, 100),
+                capacity_kwh: 60,
+                target_soc_pct: 100,
+                departure_time: '06:15',
+            });
+        }
+
+        // Manual tariff so we can pulse price in the timeline
+        this._model.tariff.mode = 'manual';
+        this._model.tariff.price_ct_per_kwh = 10;
+    }
+
+    _scenarioGridBlackoutTimelineSetup() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+        this._model.grid.limit_kw = 80;
+        this._model.grid.base_load_kw = 10;
+        this._model.grid.available = true;
+
+        // Plug 8 sessions
+        for (let i = 1; i <= Math.min(8, this._model.evcs.chargers.length); i++) {
+            this._plugCharger(`c${pad2(i)}`, {
+                soc_pct: clamp(10 + 40 * this._rng.next(), 0, 100),
+                capacity_kwh: 60,
+                target_soc_pct: 100,
+                departure_time: '06:15',
+            });
+        }
+    }
+
+    _scenarioDcRush10() {
+        this._resetToDefaultsModel();
+        this._unplugAllChargers();
+
+        this._model.grid.limit_kw = 1000;
+        this._model.grid.base_load_kw = 50;
+        this._model.pv.override.enabled = false;
+        this._model.pv.installed_kwp = 0;
+
+        // Plug up to 10 DC chargers
+        const dcChargers = this._model.evcs.chargers.filter(c => c.type === 'dc');
+        const count = Math.min(10, dcChargers.length);
+        for (let i = 0; i < count; i++) {
+            const ch = dcChargers[i];
+            this._plugCharger(ch.id, {
+                soc_pct: clamp(5 + 25 * this._rng.next(), 0, 100),
+                capacity_kwh: clamp(60 + 40 * this._rng.next(), 1, 1000),
+                target_soc_pct: 80,
+                departure_time: '08:00',
+                priority: 5,
+            });
+        }
+    }
+
+    _runScenarioTimeline(nowMs, dtSec, now) {
+        if (!this._scenario.running || !this._model) return;
+        if (!this._scenario.started_ms) return;
+
+        const elapsed = (nowMs - this._scenario.started_ms) / 1000;
+        const id = this._scenario.active;
+
+        // Default status
+        let status = `running ${id}`;
+        let phase = 'running';
+
+        switch (id) {
+            case 'grid_limit_drop_timeline': {
+                // 0-60s: 80 kW, 60-180s: 25 kW, 180-240s: 80 kW
+                if (elapsed < 60) {
+                    this._model.grid.limit_kw = 80;
+                    status = 'grid limit = 80 kW (normal)';
+                } else if (elapsed < 180) {
+                    this._model.grid.limit_kw = 25;
+                    status = 'grid limit = 25 kW (drop active)';
+                } else if (elapsed < 240) {
+                    this._model.grid.limit_kw = 80;
+                    status = 'grid limit restored = 80 kW';
+                } else {
+                    phase = 'done';
+                }
+                break;
+            }
+            case 'tariff_pulse_timeline': {
+                // Manual tariff: 10 / 120 / 10 ct/kWh
+                this._model.tariff.mode = 'manual';
+                if (elapsed < 60) {
+                    this._model.tariff.price_ct_per_kwh = 10;
+                    status = 'tariff = 10 ct/kWh (low)';
+                } else if (elapsed < 120) {
+                    this._model.tariff.price_ct_per_kwh = 120;
+                    status = 'tariff = 120 ct/kWh (high)';
+                } else if (elapsed < 180) {
+                    this._model.tariff.price_ct_per_kwh = 10;
+                    status = 'tariff = 10 ct/kWh (low again)';
+                } else {
+                    phase = 'done';
+                }
+                break;
+            }
+            case 'grid_blackout_60s_timeline': {
+                // 0-30: up, 30-90 down, 90-150 up
+                if (elapsed < 30) {
+                    this._model.grid.available = true;
+                    status = 'grid up (pre)';
+                } else if (elapsed < 90) {
+                    this._model.grid.available = false;
+                    status = 'grid blackout (active)';
+                } else if (elapsed < 150) {
+                    this._model.grid.available = true;
+                    status = 'grid recovered';
+                } else {
+                    phase = 'done';
+                }
+                break;
+            }
+            default:
+                // no timeline
+                break;
+        }
+
+        this._scenario.status = status;
+        this._scenario.phase = phase;
+
+        if (phase === 'done') {
+            // Auto-stop
+            this._scenario.running = false;
+            this._scenario.started_ms = 0;
+            this._scenario.phase = 'done';
+            this._scenario.status = `done ${id}`;
+        }
+    }
+
     async _createObjects(cfg) {
         // Root channels
         await this._ensureChannel('grid', 'Grid');
         await this._ensureChannel('pv', 'PV');
+        await this._ensureChannel('pv.override', 'PV Override');
         await this._ensureChannel('storage', 'Storage');
         await this._ensureChannel('storage.ctrl', 'Storage Control');
         await this._ensureChannel('heatpump', 'Heatpump');
@@ -355,6 +965,11 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureChannel('tariff', 'Tariff');
         await this._ensureChannel('evcs', 'EVCS');
         await this._ensureChannel('evcs.total', 'EVCS Totals');
+
+        // Scenario/Test control
+        await this._ensureChannel('scenario', 'Test Scenarios');
+        await this._ensureChannel('scenario.ctrl', 'Scenario Control');
+        await this._ensureChannel('scenario.buttons', 'Scenario Quick Buttons');
 
         // Grid states
         await this._ensureState('grid.available', { type: 'boolean', role: 'indicator.reachable', read: true, write: true, def: true });
@@ -368,10 +983,42 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureState('tariff.price_ct_per_kwh', { type: 'number', role: 'value.price', unit: 'ct/kWh', read: true, write: true, def: 30 });
         await this._ensureState('tariff.price_next_24h_json', { type: 'string', role: 'json', read: true, write: false, def: '[]' });
 
+        // Scenario states
+        await this._ensureState('scenario.selected', {
+            type: 'string',
+            role: 'text',
+            read: true,
+            write: true,
+            def: 'baseline',
+        });
+        await this._ensureState('scenario.active', { type: 'string', role: 'text', read: true, write: false, def: 'baseline' });
+        await this._ensureState('scenario.running', { type: 'boolean', role: 'indicator.working', read: true, write: false, def: false });
+        await this._ensureState('scenario.phase', { type: 'string', role: 'text', read: true, write: false, def: 'idle' });
+        await this._ensureState('scenario.elapsed_s', { type: 'number', role: 'value.time', unit: 's', read: true, write: false, def: 0 });
+        await this._ensureState('scenario.status', { type: 'string', role: 'text', read: true, write: false, def: 'idle' });
+        await this._ensureState('scenario.catalog_json', { type: 'string', role: 'json', read: true, write: false, def: '[]' });
+
+        await this._ensureState('scenario.ctrl.apply', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.ctrl.start', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.ctrl.stop', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.ctrl.reset', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+
+        // Quick buttons: one click per scenario (best for fast testing in Admin)
+        await this._ensureState('scenario.buttons.baseline', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.lm_6cars_deadline_0615', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.lm_20mix_deadline_0615', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.pv_surplus_30cars', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.grid_limit_drop_timeline', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.tariff_pulse_timeline', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.grid_blackout_60s_timeline', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+        await this._ensureState('scenario.buttons.dc_rush_10', { type: 'boolean', role: 'button', read: true, write: true, def: false });
+
         // PV
         await this._ensureState('pv.installed_kwp', { type: 'number', role: 'value', unit: 'kWp', read: true, write: true, def: cfg.pvInstalledKwp, min: 0, max: 5000 });
         await this._ensureState('pv.weather_factor', { type: 'number', role: 'level', unit: '', read: true, write: true, def: cfg.pvWeatherFactor, min: 0, max: 1 });
         await this._ensureState('pv.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('pv.override.enabled', { type: 'boolean', role: 'switch.enable', read: true, write: true, def: false });
+        await this._ensureState('pv.override.power_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: 0, min: 0, max: 100000 });
 
         // Storage
         await this._ensureState('storage.capacity_kwh', { type: 'number', role: 'value', unit: 'kWh', read: true, write: true, def: cfg.storageCapacityKwh, min: 1, max: 50000 });
@@ -450,6 +1097,8 @@ class NexowattSimAdapter extends utils.Adapter {
 
         const pvInstalled = clamp(await get('pv.installed_kwp', cfg.pvInstalledKwp), 0, 5000);
         const pvWeather = clamp(await get('pv.weather_factor', cfg.pvWeatherFactor), 0, 1);
+        const pvOverrideEnabled = !!(await get('pv.override.enabled', false));
+        const pvOverridePower = clamp(await get('pv.override.power_kw', 0), 0, 100000);
 
         const storageCapacity = clamp(await get('storage.capacity_kwh', cfg.storageCapacityKwh), 1, 50000);
         const storageMaxCh = clamp(await get('storage.max_charge_kw', cfg.storageMaxChargeKw), 0, 50000);
@@ -522,7 +1171,12 @@ class NexowattSimAdapter extends utils.Adapter {
         this._model = {
             grid: { available: gridAvailable, limit_kw: gridLimit, base_load_kw: baseLoad, power_kw: 0, over_limit: false },
             tariff: { mode: (tariffMode.toLowerCase() === 'manual') ? 'manual' : 'auto', price_ct_per_kwh: tariffPrice, price_next_24h_json: '[]' },
-            pv: { installed_kwp: pvInstalled, weather_factor: pvWeather, power_kw: 0 },
+            pv: {
+                installed_kwp: pvInstalled,
+                weather_factor: pvWeather,
+                power_kw: 0,
+                override: { enabled: pvOverrideEnabled, power_kw: pvOverridePower },
+            },
             storage: {
                 capacity_kwh: storageCapacity,
                 max_charge_kw: storageMaxCh,
@@ -573,6 +1227,9 @@ class NexowattSimAdapter extends utils.Adapter {
 
         const now = new Date(nowMs);
 
+        // Scenario engine (time-based modifications)
+        this._runScenarioTimeline(nowMs, dtSec, now);
+
         // Tariff
         // We generate both the current price and a simple forward curve.
         // Important: base/amp must be available for curve generation even in manual mode.
@@ -603,13 +1260,17 @@ class NexowattSimAdapter extends utils.Adapter {
         this._model.tariff.price_next_24h_json = JSON.stringify(curve);
 
         // PV
-        const pvProfile = solarProfile01(now);
-        const pvNoise = clamp(this._rng.normal(0, 0.02), -0.05, 0.05);
-        this._model.pv.power_kw = clamp(
-            this._model.pv.installed_kwp * this._model.pv.weather_factor * pvProfile * (1 + pvNoise),
-            0,
-            Math.max(0, this._model.pv.installed_kwp)
-        );
+        if (this._model.pv.override?.enabled) {
+            this._model.pv.power_kw = clamp(this._model.pv.override.power_kw, 0, 100000);
+        } else {
+            const pvProfile = solarProfile01(now);
+            const pvNoise = clamp(this._rng.normal(0, 0.02), -0.05, 0.05);
+            this._model.pv.power_kw = clamp(
+                this._model.pv.installed_kwp * this._model.pv.weather_factor * pvProfile * (1 + pvNoise),
+                0,
+                Math.max(0, this._model.pv.installed_kwp)
+            );
+        }
 
         // Flexible producers
         this._model.chp.power_kw = (this._model.chp.ctrl.enabled) ? clamp(this._model.chp.ctrl.power_set_kw, 0, 5000) : 0;
@@ -723,6 +1384,15 @@ class NexowattSimAdapter extends utils.Adapter {
     }
 
     async _publish(now) {
+        // Scenario
+        const elapsed = (this._scenario.running && this._scenario.started_ms) ? ((Date.now() - this._scenario.started_ms) / 1000) : 0;
+        await this._setChanged('scenario.selected', this._scenario.selected);
+        await this._setChanged('scenario.active', this._scenario.active);
+        await this._setChanged('scenario.running', this._scenario.running);
+        await this._setChanged('scenario.phase', this._scenario.phase);
+        await this._setChanged('scenario.elapsed_s', Number(elapsed.toFixed(1)));
+        await this._setChanged('scenario.status', this._scenario.status);
+
         // Grid
         await this._setChanged('grid.available', this._model.grid.available);
         await this._setChanged('grid.limit_kw', this._model.grid.limit_kw);
@@ -739,6 +1409,8 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._setChanged('pv.installed_kwp', this._model.pv.installed_kwp);
         await this._setChanged('pv.weather_factor', Number(this._model.pv.weather_factor.toFixed(3)));
         await this._setChanged('pv.power_kw', Number(this._model.pv.power_kw.toFixed(3)));
+        await this._setChanged('pv.override.enabled', this._model.pv.override.enabled);
+        await this._setChanged('pv.override.power_kw', Number(this._model.pv.override.power_kw.toFixed(3)));
 
         // Storage
         await this._setChanged('storage.capacity_kwh', this._model.storage.capacity_kwh);

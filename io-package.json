@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "nexowatt-sim",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "title": "NexoWatt EMS Simulator",
     "titleLang": {
       "en": "NexoWatt EMS Simulator",
@@ -38,6 +38,10 @@
     },
     "loglevel": "info",
     "news": {
+      "0.2.0": {
+        "en": "Add test scenarios (timeline + one-click buttons) and PV power override",
+        "de": "Test-Szenarien (Timeline + One-Click-Buttons) und PV-Power-Override hinzugefügt"
+      },
       "0.1.1": {
         "en": "Fix tariff curve and prevent tick crash",
         "de": "Fix Tarifkurve und verhindert Tick-Absturz"

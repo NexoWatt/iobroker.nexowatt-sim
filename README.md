@@ -6,6 +6,7 @@ Enthaltene Simulationen:
 
 - **Netz / Hausanschluss** (Limit, Basislast, Import/Export)
 - **PV-Anlage** (Tagesprofil, Wetterfaktor)
+- **PV-Override** (für Schnelltests: PV-Power unabhängig von Tageszeit erzwingen)
 - **Speicher** (200 kW / 200 kWh default, SoC-Physik, Lade-/Entladeleistung)
 - **Wärmepumpe**
 - **BHKW**
@@ -24,6 +25,32 @@ Enthaltene Simulationen:
 4. In den States findest du die simulierten Geräte unter:
 
 `nexowatt-sim.<instanz>.…`
+
+---
+
+## 1.1) Test-Szenarien (One-Click)
+
+Für schnelle, reproduzierbare End-to-End-Tests enthält der Adapter **vordefinierte Szenarien**. Diese lassen sich ohne Neustart der Instanz **per Klick** ausführen.
+
+Du findest sie in den States unter:
+
+- `scenario.buttons.*` → **ein Klick = Szenario ausführen** (Timeline-Szenarien starten automatisch)
+- `scenario.*` → Status/Monitoring (active, running, phase, elapsed_s, status)
+- `scenario.catalog_json` → Liste aller verfügbaren Szenarien (IDs + Beschreibung)
+
+### Bedienung in der Praxis
+
+1. Öffne im Admin die **States** oder **Objekte** der Instanz.
+2. Navigiere zu `nexowatt-sim.<instanz>.scenario.buttons`.
+3. Setze das gewünschte Button-State kurz auf `true`.
+
+Szenario-Beispiele:
+
+- `scenario.buttons.lm_6cars_deadline_0615` → 6 Fahrzeuge, Deadline 06:15
+- `scenario.buttons.grid_limit_drop_timeline` → Netzlimit fällt 80 → 25 kW und kehrt zurück
+- `scenario.buttons.tariff_pulse_timeline` → Tarif springt low/high/low
+
+Zusätzlich kannst du über `scenario.selected` + `scenario.ctrl.apply/start/stop/reset` steuern.
 
 ---
 
@@ -80,6 +107,11 @@ Der Simulator setzt dann:
 - `pv.installed_kwp` (rw)
 - `pv.weather_factor` (rw)
 - `pv.power_kw` (r)
+
+PV-Override (für Schnelltests):
+
+- `pv.override.enabled` (rw)
+- `pv.override.power_kw` (rw)
 
 ### Speicher
 
