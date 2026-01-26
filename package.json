@@ -1,0 +1,32 @@
+{
+  "name": "iobroker.nexowatt-sim",
+  "version": "0.1.0",
+  "description": "NexoWatt EMS Simulator Adapter (virtual devices for end-to-end testing)",
+  "main": "main.js",
+  "author": "NexoWatt",
+  "license": "MIT",
+  "keywords": [
+    "nexowatt",
+    "ems",
+    "simulator",
+    "testing",
+    "evcs",
+    "pv",
+    "battery",
+    "load-management"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/<YOUR_ORG>/iobroker.nexowatt-sim.git"
+  },
+  "bugs": {
+    "url": "https://github.com/<YOUR_ORG>/iobroker.nexowatt-sim/issues"
+  },
+  "homepage": "https://github.com/<YOUR_ORG>/iobroker.nexowatt-sim#readme",
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "@iobroker/adapter-core": "^3.0.0"
+  }
+}

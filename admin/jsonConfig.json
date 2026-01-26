@@ -1,0 +1,132 @@
+{
+  "i18n": true,
+  "type": "tabs",
+  "items": {
+    "general": {
+      "type": "panel",
+      "label": "General",
+      "items": {
+        "updateIntervalMs": {
+          "type": "number",
+          "label": "Update interval (ms)",
+          "min": 200,
+          "max": 60000,
+          "sm": 6
+        },
+        "randomSeed": {
+          "type": "number",
+          "label": "Random seed (deterministic runs)",
+          "min": 0,
+          "max": 999999,
+          "sm": 6
+        }
+      }
+    },
+    "grid_tariff": {
+      "type": "panel",
+      "label": "Grid & Tariff",
+      "items": {
+        "gridLimitKw": {
+          "type": "number",
+          "label": "Grid limit / Hausanschluss (kW)",
+          "min": 1,
+          "max": 2000,
+          "sm": 6
+        },
+        "baseLoadKw": {
+          "type": "number",
+          "label": "Base load (kW) \u2013 ohne EV / ohne Flex",
+          "min": 0,
+          "max": 500,
+          "sm": 6
+        }
+      }
+    },
+    "pv_storage": {
+      "type": "panel",
+      "label": "PV & Storage",
+      "items": {
+        "pvInstalledKwp": {
+          "type": "number",
+          "label": "PV installed (kWp)",
+          "min": 0,
+          "max": 2000,
+          "sm": 4
+        },
+        "pvWeatherFactor": {
+          "type": "number",
+          "label": "PV weather factor (0..1)",
+          "min": 0,
+          "max": 1,
+          "step": 0.01,
+          "sm": 4
+        },
+        "storageInitialSocPct": {
+          "type": "number",
+          "label": "Storage initial SoC (%)",
+          "min": 0,
+          "max": 100,
+          "sm": 4
+        },
+        "storageCapacityKwh": {
+          "type": "number",
+          "label": "Storage capacity (kWh)",
+          "min": 1,
+          "max": 5000,
+          "sm": 4
+        },
+        "storageMaxChargeKw": {
+          "type": "number",
+          "label": "Max charge (kW)",
+          "min": 0,
+          "max": 5000,
+          "sm": 4
+        },
+        "storageMaxDischargeKw": {
+          "type": "number",
+          "label": "Max discharge (kW)",
+          "min": 0,
+          "max": 5000,
+          "sm": 4
+        }
+      }
+    },
+    "evcs": {
+      "type": "panel",
+      "label": "EV Charging (EVCS)",
+      "items": {
+        "chargersCount": {
+          "type": "number",
+          "label": "Number of simulated charge points",
+          "min": 1,
+          "max": 200,
+          "sm": 6
+        },
+        "autoConnectEnabled": {
+          "type": "checkbox",
+          "label": "Auto-connect vehicles on startup",
+          "sm": 6
+        },
+        "autoConnectCount": {
+          "type": "number",
+          "label": "Auto-connected sessions (count)",
+          "min": 0,
+          "max": 200,
+          "sm": 4
+        },
+        "defaultDepartureTime": {
+          "type": "text",
+          "label": "Default departure time (HH:MM)",
+          "sm": 4
+        },
+        "defaultTargetSocPct": {
+          "type": "number",
+          "label": "Default target SoC (%)",
+          "min": 0,
+          "max": 100,
+          "sm": 4
+        }
+      }
+    }
+  }
+}
