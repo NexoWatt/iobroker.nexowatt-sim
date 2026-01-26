@@ -44,11 +44,16 @@ Du findest sie in den States unter:
 2. Navigiere zu `nexowatt-sim.<instanz>.scenario.buttons`.
 3. Setze das gewünschte Button-State kurz auf `true`.
 
-Szenario-Beispiele:
+Szenario-Beispiele (Auszug):
 
+- `scenario.buttons.suite_smoke_all` → **Schneller Smoke-Test** (mehrere Stages nacheinander)
 - `scenario.buttons.lm_6cars_deadline_0615` → 6 Fahrzeuge, Deadline 06:15
-- `scenario.buttons.grid_limit_drop_timeline` → Netzlimit fällt 80 → 25 kW und kehrt zurück
-- `scenario.buttons.tariff_pulse_timeline` → Tarif springt low/high/low
+- `scenario.buttons.lm_50ports_deadline_0615` → **alle Ports**, Deadline 06:15
+- `scenario.buttons.pv_cloud_ramp_timeline` → PV-„Wolken“ (Override-Rampe)
+- `scenario.buttons.tariff_extremes_timeline` → **negative/hohe** Strompreise (Tarif-Extremtest)
+- `scenario.buttons.grid_14a_limit_timeline` → Netzlimit-Reduktion (14a-Style)
+- `scenario.buttons.faults_evcs_faulted_5` → 5 Ladepunkte **Faulted**
+- `scenario.buttons.fuzz_10min_medium` → 10 Minuten „Chaos-Test“ (stabile Reproduzierbarkeit via randomSeed)
 
 Zusätzlich kannst du über `scenario.selected` + `scenario.ctrl.apply/start/stop/reset` steuern.
 

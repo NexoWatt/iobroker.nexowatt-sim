@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "nexowatt-sim",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "title": "NexoWatt EMS Simulator",
     "titleLang": {
       "en": "NexoWatt EMS Simulator",
@@ -38,6 +38,10 @@
     },
     "loglevel": "info",
     "news": {
+      "0.3.0": {
+        "en": "Add full scenario suite (many modes), fault injection, fuzz testing, suites and improved scenario buttons; allow negative tariff prices",
+        "de": "Erweitertes Szenario-Set (viele Modi), Fault-Injection, Fuzz-Tests, Suites und automatische Szenario-Buttons; negative Tarifpreise erlaubt"
+      },
       "0.2.0": {
         "en": "Add test scenarios (timeline + one-click buttons) and PV power override",
         "de": "Test-Szenarien (Timeline + One-Click-Buttons) und PV-Power-Override hinzugefügt"
