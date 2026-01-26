@@ -157,7 +157,7 @@ class NexowattSimAdapter extends utils.Adapter {
             await this.setStateAsync('info.connection', { val: true, ack: true });
 
             this._lastTickMs = Date.now();
-            this._timer = setInterval(() => this._tick(), cfg.updateIntervalMs);
+            this._timer = setInterval(() => { this._tick().catch(err => this.log.error(`tick failed: ${err?.stack || err}`)); }, cfg.updateIntervalMs);
         } catch (err) {
             this.log.error(`onReady failed: ${err?.stack || err}`);
         }
@@ -574,14 +574,22 @@ class NexowattSimAdapter extends utils.Adapter {
         const now = new Date(nowMs);
 
         // Tariff
+        // We generate both the current price and a simple forward curve.
+        // Important: base/amp must be available for curve generation even in manual mode.
+        let base = 32;
+        let amp = 10;
+
         if (this._model.tariff.mode === 'auto') {
             const hour = now.getHours() + now.getMinutes() / 60;
             // Example: 22..45 ct/kWh with daily sine + noise
-            const base = 32;
-            const amp = 10;
             const daily = base + amp * Math.sin((2 * Math.PI * (hour - 7)) / 24);
             const noise = this._rng.normal(0, 0.4);
             this._model.tariff.price_ct_per_kwh = clamp(daily + noise, 0, 500);
+        } else {
+            // Manual mode: keep current price as baseline and use a flat curve
+            base = clamp(this._model.tariff.price_ct_per_kwh ?? base, 0, 500);
+            amp = 0;
+            this._model.tariff.price_ct_per_kwh = base;
         }
 
         // Build a simple 24h forward curve (hourly) for EMS tests
