@@ -376,248 +376,241 @@ class NexowattSimAdapter extends utils.Adapter {
     // ---------------------------------------------------------------------
     // Scenario / Test modes
     // ---------------------------------------------------------------------
-    _scenarioDefinitions() {
-        // Full scenario catalog (One-Click in Admin via scenario.buttons.*)
+        _scenarioDefinitions() {
+        // Szenario-Katalog (One-Click über scenario.buttons.*)
         return [
-            // --- Suites / automation ---
+            // --- Test-Suites ---
             {
                 id: 'suite_smoke_all',
-                title: 'Suite: Smoke Test (Quick)',
+                title: 'Test-Suite: Schnelltest (kompakt)',
                 kind: 'timeline',
                 duration_s: 420,
-                description: 'Runs a compact end-to-end smoke suite: baseline → LM6 deadline → tariff pulse → grid limit drop → PV surplus → DC rush → fault injection → done.',
+                description: 'Führt einen kompakten End-to-End-Schnelltest aus: Baseline -> LM6 Zielzeit -> Tarif-Puls -> Netzlimit-Drop -> PV-Überschuss -> DC-Rush -> Fault-Injection -> fertig.',
             },
             {
                 id: 'suite_full_all',
-                title: 'Suite: Full Test (Long)',
+                title: 'Test-Suite: Volltest (lang)',
                 kind: 'timeline',
                 duration_s: 1800,
-                description: 'Runs a longer end-to-end suite with arrival/departure waves, PV clouds, tariff extremes and random disturbances (fuzz).',
+                description: 'Führt eine längere End-to-End-Suite aus (Ankunft/Abfahrt-Wellen, PV-Wolken, Tarif-Extremwerte und zufällige Störungen/Fuzz).',
             },
 
-            // --- Baseline ---
+            // --- Basis ---
             {
                 id: 'baseline',
-                title: 'Baseline / Reset',
+                title: 'Basiszustand / Reset',
                 kind: 'oneshot',
-                description: 'Resets the simulator to adapter defaults (grid/PV/storage) and clears EV sessions and fault flags.',
+                description: 'Setzt den Simulator auf die Adapter-Defaults zurück (Netz/PV/Speicher) und löscht EV-Sessions sowie Fault-Flags.',
             },
 
-            // --- Load management / deadlines ---
+            // --- Lastmanagement ---
             {
                 id: 'lm_6cars_deadline_0615',
-                title: 'Load Mgmt: 6 Cars, Deadline 06:15',
+                title: 'Lastmanagement: 6 Fahrzeuge, Zielzeit 06:15',
                 kind: 'oneshot',
-                description: '40 kW grid, 6 sessions with different SoC, target 100%, departure 06:15. PV off (night).',
+                description: '40 kW Netzlimit, 6 Sessions mit unterschiedlichem SoC, Ziel 100%, Abfahrt 06:15. PV aus (Nacht).',
             },
             {
                 id: 'lm_20mix_deadline_0615',
-                title: 'Load Mgmt: 20 Mixed Chargers, Deadline 06:15',
+                title: 'Lastmanagement: 20 gemischte Ladepunkte, Zielzeit 06:15',
                 kind: 'oneshot',
-                description: '40 kW grid, 20 sessions across AC 11/22 kW and DC, target 100%, departure 06:15. PV off.',
+                description: '40 kW Netzlimit, 20 Sessions über AC 11/22 kW und DC, Ziel 100%, Abfahrt 06:15. PV aus (Nacht).',
             },
             {
                 id: 'lm_50ports_deadline_0615',
-                title: 'Load Mgmt: Full Site (all ports), Deadline 06:15',
+                title: 'Lastmanagement: Standort voll belegt (alle Ports), Zielzeit 06:15',
                 kind: 'oneshot',
-                description: '40 kW grid, plugs ALL available charge points with random SoC/capacity. Target 100%, departure 06:15. PV off.',
+                description: '40 kW Netzlimit, steckt ALLE verfügbaren Ladepunkte mit zufälligem SoC/Kapazität an. Ziel 100%, Abfahrt 06:15. PV aus (Nacht).',
             },
             {
                 id: 'lm_priorities_3tiers',
-                title: 'Load Mgmt: Priorities 3 Tiers',
+                title: 'Lastmanagement: Prioritäten in 3 Stufen',
                 kind: 'oneshot',
-                description: 'Plugs 15 sessions with three priority tiers (10/7/4). Useful to verify priority handling in scarcity.',
+                description: 'Steckt 15 Sessions mit drei Prioritätsstufen (10/7/4) an. Gut um Priorisierung bei Knappheit zu prüfen.',
             },
             {
                 id: 'lm_arrival_wave_timeline',
-                title: 'Timeline: Arrival Wave (vehicles arrive gradually)',
+                title: 'Timeline: Ankunftswelle (Fahrzeuge kommen nach und nach)',
                 kind: 'timeline',
                 duration_s: 600,
-                description: 'Starts empty and plugs one new vehicle every 10s (up to 20). Helps test dynamic allocation as new sessions appear.',
+                description: 'Startet leer und steckt alle 10s ein neues Fahrzeug an (bis 20). Testet dynamische Verteilung bei neuen Sessions.',
             },
             {
                 id: 'lm_departure_wave_timeline',
-                title: 'Timeline: Departure Wave (vehicles leave gradually)',
+                title: 'Timeline: Abfahrtswelle (Fahrzeuge gehen nach und nach)',
                 kind: 'timeline',
                 duration_s: 600,
-                description: 'Starts with 20 sessions and unplugs vehicles over time. Helps test redistribution when sessions complete/leave.',
+                description: 'Startet mit 20 Sessions und zieht Fahrzeuge über Zeit ab. Testet Umverteilung wenn Sessions enden/gehen.',
             },
 
-            // --- PV / storage / surplus ---
+            // --- PV / Speicher ---
             {
                 id: 'pv_surplus_30cars',
-                title: 'PV Surplus: 30 Cars + Forced PV Power',
+                title: 'PV-Überschuss: 30 Fahrzeuge + erzwungene PV-Leistung',
                 kind: 'oneshot',
-                description: 'Forces PV power (override) to create surplus. 30 sessions, target 100%, departure 17:00.',
+                description: 'Erzwingt PV-Leistung (Override) für Überschuss. 30 Sessions, Ziel 100%, Abfahrt 17:00.',
             },
             {
                 id: 'pv_cloud_ramp_timeline',
-                title: 'Timeline: PV Clouds / Ramp',
+                title: 'Timeline: PV-Wolken / Rampen',
                 kind: 'timeline',
                 duration_s: 600,
-                description: 'Forces PV override and modulates PV power up/down (clouds). Ideal to test PV-following behaviour.',
+                description: 'Erzwingt PV-Override und moduliert PV-Leistung hoch/runter (Wolken). Ideal für PV-Following/Überschuss-Regelung.',
             },
             {
                 id: 'storage_soc0',
-                title: 'Storage Edge: SoC = 0%',
+                title: 'Speicher-Grenzfall: SoC = 0 %',
                 kind: 'oneshot',
-                description: 'Sets storage SoC to 0% (empty). Useful to test discharge limits and EMS fallback behaviour.',
+                description: 'Setzt Speicher-SoC auf 0% (leer). Testet Entladegrenzen und EMS-Fallback-Verhalten.',
             },
             {
                 id: 'storage_soc100',
-                title: 'Storage Edge: SoC = 100%',
+                title: 'Speicher-Grenzfall: SoC = 100 %',
                 kind: 'oneshot',
-                description: 'Sets storage SoC to 100% (full). Useful to test charge limits and EMS fallback behaviour.',
+                description: 'Setzt Speicher-SoC auf 100% (voll). Testet Ladebegrenzung und Überschuss-Handling.',
             },
             {
                 id: 'storage_power_limit_low',
-                title: 'Storage Limit: Low Power (±20 kW)',
+                title: 'Speicher-Grenzfall: niedrige Leistungsgrenze',
                 kind: 'oneshot',
-                description: 'Constrains storage max charge/discharge to ±20 kW. Helps validate EMS under weak storage power.',
+                description: 'Begrenzt Speicherleistung stark (z.B. max_charge/discharge=20 kW). Testet EMS bei limitiertem Speicher.',
             },
 
-            // --- Tariff / price optimisation ---
+            // --- Tarif ---
             {
                 id: 'tariff_flat_low_10ct',
-                title: 'Tariff: Manual Flat 10 ct/kWh',
+                title: 'Tarif: konstant günstig (10 ct/kWh)',
                 kind: 'oneshot',
-                description: 'Switches to manual tariff and sets a flat price of 10 ct/kWh.',
+                description: 'Setzt Tarif auf manuell und konstant günstig (10 ct/kWh).',
             },
             {
                 id: 'tariff_pulse_timeline',
-                title: 'Timeline: Tariff Pulse (low/high/low)',
+                title: 'Timeline: Tarif-Puls (günstig/teuer/günstig)',
                 kind: 'timeline',
                 duration_s: 180,
-                description: 'Manual price: 10 ct/kWh (0-60s), 120 ct/kWh (60-120s), 10 ct/kWh (120-180s).',
+                description: 'Puls: 10 ct/kWh (günstig) -> 120 ct/kWh (teuer) -> 10 ct/kWh. Prüft ob Deadlines trotz teuer eingehalten werden.',
             },
             {
                 id: 'tariff_extremes_timeline',
-                title: 'Timeline: Tariff Extremes (negative / very high)',
+                title: 'Timeline: Tarif-Extremwerte (negativ/hoch/normal)',
                 kind: 'timeline',
-                duration_s: 240,
-                description: 'Manual price: -20 (0-80s), +200 (80-160s), +30 (160-240s). Good for stress-testing tariff logic.',
+                duration_s: 300,
+                description: 'Extremwerte: -20 ct/kWh -> 250 ct/kWh -> 30 ct/kWh. Testet negative Preise und hohe Peaks.',
             },
 
-            // --- Grid events / constraints ---
+            // --- Netz / Grundlast ---
             {
                 id: 'grid_limit_drop_timeline',
-                title: 'Timeline: Grid Limit Drop (80 -> 25 kW)',
+                title: 'Timeline: Netzlimit-Drop (80 -> 25 -> 80 kW)',
                 kind: 'timeline',
                 duration_s: 240,
-                description: 'Starts at 80 kW, after 60 s drops to 25 kW for 120 s, then restores to 80 kW.',
+                description: 'Netzlimit: 80 kW -> 25 kW -> 80 kW. Prüft Drosselung und Recovery.',
             },
             {
                 id: 'grid_14a_limit_timeline',
-                title: 'Timeline: Grid Limit (14a style)',
+                title: 'Timeline: 14a-Netzlimit-Event (hart + Recovery)',
                 kind: 'timeline',
                 duration_s: 600,
-                description: 'Simulates a curtailment event: 0-60s normal, 60-300s hard reduced grid limit, then recovery.',
+                description: 'Simuliert ein 14a-Ereignis: Netzlimit wird hart reduziert und später wieder freigegeben.',
             },
             {
                 id: 'base_load_spike_timeline',
-                title: 'Timeline: Base Load Spikes',
+                title: 'Timeline: Grundlast-Spikes (Verbrauchsspitzen)',
                 kind: 'timeline',
                 duration_s: 300,
-                description: 'Simulates sudden site base load spikes (e.g., other consumers). Helps validate peak-shaving and robustness.',
+                description: 'Basislast-Spikes (Verbrauchsspitzen) überlagern das Netz. Prüft ob EVCS korrekt zurückgeregelt wird.',
             },
             {
                 id: 'grid_blackout_60s_timeline',
-                title: 'Timeline: Grid Blackout 60s',
+                title: 'Timeline: Netz-Ausfall 60 s (Blackout)',
                 kind: 'timeline',
                 duration_s: 150,
-                description: 'Grid available=false from 30s to 90s, then recovers. Useful for failover tests.',
+                description: 'Netz verfügbar -> 60s Ausfall (available=false) -> Recovery. Prüft Verhalten bei Blackout.',
             },
 
-            // --- DC-specific ---
+            // --- DC-Schnellladen ---
             {
                 id: 'dc_rush_10',
-                title: 'DC Stress: 10 DC Sessions (Fast-Charge Rush)',
+                title: 'DC-Stress: 10 DC-Sessions (Rush Hour)',
                 kind: 'oneshot',
-                description: 'Plugs up to 10 DC charge points, low SoC, target 80%. High grid limit for stress testing.',
+                description: 'Steckt 10 DC-Sessions mit niedrigem SoC an (Ziel 80%), bei hohem Netzlimit. Stress-Test.',
             },
             {
                 id: 'dc_taper_single_400',
-                title: 'DC Taper Test: Single 400 kW',
+                title: 'DC-Verlauf: 1x 400 kW + Tapering ab 80 %',
                 kind: 'oneshot',
-                description: 'Plugs one 400 kW DC charger at ~75% SoC so you can observe tapering beyond 80%.',
+                description: 'Eine 400 kW DC-Session; ab ca. 80% SoC Tapering (Leistungsabfall) sichtbar. Prüft DC-Regelung.',
             },
             {
                 id: 'dc_all_ports_stress',
-                title: 'DC Stress: All DC Ports',
+                title: 'DC-Stress: alle DC-Ports belegt',
                 kind: 'oneshot',
-                description: 'Plugs ALL DC charge points at low SoC (target 80%) with a high grid limit. Heavy stress test.',
+                description: 'Steckt ALLE DC-Ports an (niedriger SoC, Ziel 80%), sehr hohes Netzlimit. Heavy-Stress.',
             },
 
-            // --- Fault injection ---
+            // --- Fehler-Injektion ---
             {
                 id: 'faults_evcs_faulted_5',
-                title: 'Faults: 5 EVCS Faulted',
+                title: 'Fehler: 5 Ladepunkte Faulted',
                 kind: 'oneshot',
-                description: 'Marks 5 random charge points as faulted (status=Faulted, power=0).',
+                description: 'Markiert 5 zufällige Ladepunkte als Faulted (Status=Faulted, Leistung=0).',
             },
             {
                 id: 'faults_evcs_unavailable_5',
-                title: 'Faults: 5 EVCS Unavailable',
+                title: 'Fehler: 5 Ladepunkte Unavailable',
                 kind: 'oneshot',
-                description: 'Marks 5 random charge points as unavailable/offline (status=Unavailable, power=0).',
+                description: 'Markiert 5 zufällige Ladepunkte als Unavailable/Offline (Status=Unavailable, Leistung=0).',
             },
             {
                 id: 'faults_evcs_meter_freeze_3',
-                title: 'Faults: 3 EVCS Meter Freeze',
+                title: 'Fehler: 3 Ladepunkte Messwert-Freeze',
                 kind: 'oneshot',
-                description: 'Freezes meas.* + vehicle.soc of 3 random charge points (stuck meter simulation).',
+                description: 'Friert meas.* und vehicle.soc von 3 zufälligen Ladepunkten ein (Messwert hängt).',
             },
             {
                 id: 'faults_clear_all',
-                title: 'Faults: Clear All',
+                title: 'Fehler: Alle zurücksetzen',
                 kind: 'oneshot',
-                description: 'Clears all EVCS fault/offline/meter-freeze flags.',
+                description: 'Löscht alle Fault/Offline/Meter-Freeze Flags.',
             },
 
-            // --- Randomised disturbances ---
+            // --- Chaos/Fuzz ---
             {
                 id: 'fuzz_10min_medium',
-                title: 'Fuzz: 10 min Medium Disturbance',
+                title: 'Chaos-Test: 10 min (mittel)',
                 kind: 'timeline',
                 duration_s: 600,
-                description: 'Random plug/unplug, PV/tariff/grid changes and occasional faults. Deterministic via randomSeed.',
+                description: 'Zufällige Plug/Unplug, PV/Tarif/Netz-Änderungen und gelegentliche Faults. Reproduzierbar über randomSeed.',
             },
             {
                 id: 'fuzz_30min_heavy',
-                title: 'Fuzz: 30 min Heavy Disturbance',
+                title: 'Chaos-Test: 30 min (stark)',
                 kind: 'timeline',
                 duration_s: 1800,
-                description: 'More frequent random events and faults. Intended to find edge-case logic bugs and stability issues.',
+                description: 'Wie oben, aber häufiger/chaotischer. Für Edge-Cases und Stabilität. Reproduzierbar über randomSeed.',
             },
 
-            // --- External loads / generators (one-shot starting points) ---
+            // --- Externe Lasten/Erzeuger ---
             {
                 id: 'ext_heatpump_30kw',
-                title: 'External Load: Heatpump 30 kW',
+                title: 'Externe Last: Wärmepumpe 30 kW',
                 kind: 'oneshot',
-                description: 'Enables heatpump and sets power_set=30 kW (as an external site consumer).',
+                description: 'Aktiviert Wärmepumpe und setzt power_set=30 kW (externer Verbraucher).',
             },
             {
                 id: 'ext_chp_80kw',
-                title: 'External Generation: CHP/BHKW 80 kW',
+                title: 'Externe Erzeugung: BHKW 80 kW',
                 kind: 'oneshot',
-                description: 'Enables CHP/BHKW and sets power_set=80 kW (as an external generator).',
+                description: 'Aktiviert BHKW und setzt power_set=80 kW (externer Erzeuger).',
             },
             {
                 id: 'ext_generator_200kw',
-                title: 'External Generation: Generator 200 kW',
+                title: 'Externe Erzeugung: Generator 200 kW',
                 kind: 'oneshot',
-                description: 'Enables generator and sets power_set=200 kW (as an external generator).',
+                description: 'Aktiviert Generator und setzt power_set=200 kW (externer Erzeuger).',
             },
-        ];
-    }
 
-    _normalizeScenarioId(value) {
-        const raw = String(value || '').trim();
-        if (!raw) return 'baseline';
-        const id = raw.replace(/\s+/g, '_');
-        const known = new Set(this._scenarioDefinitions().map(s => s.id));
-        return known.has(id) ? id : 'baseline';
+        ];
     }
 
     async _initScenarioStates() {
@@ -2047,9 +2040,9 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureChannel('evcs.total', 'EVCS Totals');
 
         // Scenario/Test control
-        await this._ensureChannel('scenario', 'Test Scenarios');
-        await this._ensureChannel('scenario.ctrl', 'Scenario Control');
-        await this._ensureChannel('scenario.buttons', 'Scenario Quick Buttons');
+        await this._ensureChannel('scenario', 'Testszenarien');
+        await this._ensureChannel('scenario.ctrl', 'Szenario-Steuerung');
+        await this._ensureChannel('scenario.buttons', 'Schnell-Buttons');
 
         // Grid states
         await this._ensureState('grid.available', { type: 'boolean', role: 'indicator.reachable', read: true, write: true, def: true });
@@ -2086,7 +2079,7 @@ class NexowattSimAdapter extends utils.Adapter {
         // Quick buttons: one click per scenario (best for fast testing in Admin)
         // We auto-generate one button per scenario definition so new scenarios appear automatically.
         for (const s of this._scenarioDefinitions()) {
-            await this._ensureState(`scenario.buttons.${s.id}`, { type: 'boolean', role: 'button', read: true, write: true, def: false });
+            await this._ensureState(`scenario.buttons.${s.id}`, { type: 'boolean', role: 'button', read: true, write: true, def: false, name: s.title, desc: s.description });
         }
 
         // PV
@@ -2577,11 +2570,15 @@ class NexowattSimAdapter extends utils.Adapter {
     }
 
     async _ensureChannel(id, name) {
-        await this.setObjectNotExistsAsync(id, {
+        const obj = {
             type: 'channel',
             common: { name },
             native: {},
-        });
+        };
+        await this.setObjectNotExistsAsync(id, obj);
+
+        // Update existing objects as well (e.g. renamed labels)
+        await this.extendObjectAsync(id, { common: { name } });
     }
 
     async _ensureState(id, common) {
@@ -2593,7 +2590,11 @@ class NexowattSimAdapter extends utils.Adapter {
             },
             native: {},
         };
+
         await this.setObjectNotExistsAsync(id, obj);
+
+        // Update existing objects as well (e.g. renamed labels)
+        await this.extendObjectAsync(id, { common: obj.common });
 
         // Only apply default value if the state has no persisted value yet.
         if (common.def !== undefined) {

@@ -2,6 +2,8 @@
 
 Dieser Adapter stellt **virtuelle Geräte** bereit, damit du dein **NexoWatt EMS** ohne physische Hardware realistisch testen kannst.
 
+
+**Neu ab v0.3.1:** Die Schnell-Buttons unter `scenario.buttons.*` sind in **Deutsch** benannt (Name-Spalte) und enthalten eine Kurzbeschreibung.
 Enthaltene Simulationen:
 
 - **Netz / Hausanschluss** (Limit, Basislast, Import/Export)

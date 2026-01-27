@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "nexowatt-sim",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "title": "NexoWatt EMS Simulator",
     "titleLang": {
       "en": "NexoWatt EMS Simulator",
@@ -9,7 +9,7 @@
     },
     "desc": {
       "en": "Virtual devices for testing NexoWatt EMS without physical hardware (PV, battery, heatpump, CHP, generator, EVCS).",
-      "de": "Virtuelle Geräte zum Testen des NexoWatt EMS ohne physische Hardware (PV, Speicher, Wärmepumpe, BHKW, Generator, Ladepunkte)."
+      "de": "Virtuelle Ger\u00e4te zum Testen des NexoWatt EMS ohne physische Hardware (PV, Speicher, W\u00e4rmepumpe, BHKW, Generator, Ladepunkte)."
     },
     "authors": [
       "NexoWatt <dev@nexowatt.local>"
@@ -44,7 +44,7 @@
       },
       "0.2.0": {
         "en": "Add test scenarios (timeline + one-click buttons) and PV power override",
-        "de": "Test-Szenarien (Timeline + One-Click-Buttons) und PV-Power-Override hinzugefügt"
+        "de": "Test-Szenarien (Timeline + One-Click-Buttons) und PV-Power-Override hinzugef\u00fcgt"
       },
       "0.1.1": {
         "en": "Fix tariff curve and prevent tick crash",
