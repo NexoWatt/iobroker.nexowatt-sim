@@ -190,7 +190,17 @@ class NexowattSimAdapter extends utils.Adapter {
                 defaultTargetSocPct: clamp(this.config.defaultTargetSocPct ?? 100, 0, 100),
 
                 // Szenario-/Test-Ausführung
-                scenarioDurationSec: clamp(this.config.scenarioDurationSec ?? 300, 30, 86400),
+                // NOTE: In practice, users often enter "5" meaning *5 minutes*.
+                // To avoid "scenario snaps back to baseline" after only 30s (min clamp),
+                // we interpret small values (1..15) as minutes and convert them to seconds.
+                scenarioDurationSec: (() => {
+                    const raw = Number(this.config.scenarioDurationSec ?? 300);
+                    let seconds = raw;
+                    if (Number.isFinite(raw) && raw > 0 && raw <= 15) {
+                        seconds = raw * 60;
+                    }
+                    return clamp(seconds, 30, 86400);
+                })(),
                 scenarioResetPauseSec: clamp(this.config.scenarioResetPauseSec ?? 15, 0, 600),
                 autoResetToBaseline: (this.config.autoResetToBaseline === undefined) ? true : !!this.config.autoResetToBaseline,
                 unitsAutoDetect: (this.config.unitsAutoDetect === undefined) ? true : !!this.config.unitsAutoDetect,
@@ -274,6 +284,52 @@ class NexowattSimAdapter extends utils.Adapter {
             this.log.warn(`stateChange handler error: ${err?.message || err}`);
         }
     }
+
+    _normalizeScenarioId(value) {
+        // Normalizes user input to a known scenario id.
+        // - tolerant to casing, spaces, dashes
+        // - strips prefixes like "scenario.buttons."
+        // - falls back to baseline if unknown
+
+        const raw = (value === null || value === undefined) ? '' : String(value);
+        let id = raw.trim();
+        if (!id) return 'baseline';
+
+        id = id.toLowerCase();
+
+        // Defensive: allow callers to pass full ids incl. prefixes
+        if (id.startsWith('scenario.buttons.')) id = id.substring('scenario.buttons.'.length);
+        if (id.startsWith('scenario.')) id = id.substring('scenario.'.length);
+
+        // Unify separators
+        id = id.replace(/[\s\-]+/g, '_');
+        // Keep only [a-z0-9_]
+        id = id.replace(/[^a-z0-9_]/g, '');
+        // Collapse multiple underscores
+        id = id.replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+
+        const defs = this._scenarioDefinitions();
+        const known = new Set(defs.map((s) => s.id));
+
+        if (known.has(id)) return id;
+
+        // Common aliases
+        const aliases = {
+            suite: 'suite_all_scenarios_5min',
+            all: 'suite_all_scenarios_5min',
+            suite_all: 'suite_all_scenarios_5min',
+            stop: 'suite_stop',
+            suite_stop: 'suite_stop',
+            reset: 'baseline',
+            default: 'baseline',
+        };
+        const a = aliases[id];
+        if (a && known.has(a)) return a;
+
+        // Unknown → baseline
+        return 'baseline';
+    }
+
     _normalizePowerKw(value) {
         let v = Number(value);
         if (!Number.isFinite(v)) v = 0;

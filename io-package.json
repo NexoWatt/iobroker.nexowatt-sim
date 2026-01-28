@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "nexowatt-sim",
-    "version": "0.6.0",
+    "version": "0.6.1",
     "title": "NexoWatt EMS Simulator",
     "titleLang": {
       "en": "NexoWatt EMS Simulator",
@@ -61,6 +61,10 @@
       "0.6.0": {
         "en": "Add NVP import/export datapoints (grid buy/sell) plus traffic-light status/utilization for fast validation.",
         "de": "NVP/Netz-Bezug & Einspeisung als Datenpunkte ergänzt (grid.buy_w / grid.sell_w) sowie Ampel-Status/Auslastung für schnelle Validierung."
+      },
+      "0.6.1": {
+        "en": "Fix: scenario selection/normalization; interpret small duration values (1..15) as minutes to avoid premature return to baseline.",
+        "de": "Fix: Szenario-Auswahl/Normalisierung; kleine Dauerwerte (1..15) werden als Minuten interpretiert, damit Szenarien nicht nach 30s wieder in den Basiszustand springen."
       }
     }
   },
