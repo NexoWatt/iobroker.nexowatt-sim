@@ -193,6 +193,7 @@ class NexowattSimAdapter extends utils.Adapter {
             this.log.info(`Starting simulator with ${cfg.chargersCount} EVCS, interval=${cfg.updateIntervalMs}ms`);
 
             await this._createObjects(cfg);
+            await this._runMigrations(cfg);
             await this._initModel(cfg);
 
             // Scenario catalog & defaults
@@ -253,17 +254,68 @@ class NexowattSimAdapter extends utils.Adapter {
             this.log.warn(`stateChange handler error: ${err?.message || err}`);
         }
     }
-
-
     _normalizePowerKw(value) {
         let v = Number(value);
         if (!Number.isFinite(v)) v = 0;
-        // Auto-detect: some controllers may write Watts although the datapoint name ends with _kw.
-        // Heuristic: values above 1000 are treated as W and converted to kW.
-        if (this._cfg && this._cfg.unitsAutoDetect) {
-            if (Math.abs(v) > 1000) v = v / 1000;
+
+        // IMPORTANT (VIS/EMS v0.6.75+):
+        // All simulator *power* datapoints are treated as Watts (W) by the NexoWatt VIS/EMS
+        // even if the datapoint name ends with '_kw'.
+        //
+        // Internally this simulator works in kW → therefore we convert incoming values W → kW.
+        // (Legacy installs are migrated on startup, see _runMigrations())
+        return v / 1000;
+    }
+
+    async _runMigrations(cfg) {
+        // Migrations run once per instance to prevent accidental re-scaling on restarts.
+        // Marker is stored in info.migration_done (boolean).
+        try {
+            const cur = await this.getStateAsync('info.migration_done');
+            const done = !!(cur && (cur.val === true || cur.val === 1 || cur.val === 'true'));
+            if (done) return;
+        } catch (_e) {
+            // ignore
         }
-        return v;
+
+        await this._migrateLegacyEvcsLimitsToW(cfg);
+
+        try {
+            await this.setStateAsync('info.migration_done', { val: true, ack: true });
+        } catch (_e) {
+            // ignore
+        }
+    }
+
+    async _migrateLegacyEvcsLimitsToW(cfg) {
+        // v0.4.0 and earlier stored EVCS limits in kW inside evcs.*.ctrl.limit_kw.
+        // Since VIS/EMS v0.6.75 the same datapoint is treated as W.
+        // We convert persisted values like 11 -> 11000.
+
+        const count = Math.max(1, Math.min(200, Math.round(Number(cfg && cfg.chargersCount ? cfg.chargersCount : 1))));
+
+        for (let i = 1; i <= count; i++) {
+            const cid = `c${pad2(i)}`;
+            const id = `evcs.${cid}.ctrl.limit_kw`;
+            try {
+                const st = await this.getStateAsync(id);
+                if (!st || st.val === null || st.val === undefined) continue;
+                const v = Number(st.val);
+                if (!Number.isFinite(v)) continue;
+
+                // Heuristic:
+                // - legacy kW values are typically <= 500
+                // - W values are typically in the thousands (>= 1000)
+                // We only migrate non-zero values.
+                if (Math.abs(v) > 0 && Math.abs(v) <= 500) {
+                    const migrated = Math.round(v * 1000);
+                    await this.setStateAsync(id, { val: migrated, ack: true });
+                    this.log.info(`[MIGRATION] ${id}: ${v} (legacy kW) -> ${migrated} W`);
+                }
+            } catch (_e) {
+                // ignore
+            }
+        }
     }
 
 
@@ -2516,6 +2568,7 @@ class NexowattSimAdapter extends utils.Adapter {
 
     async _createObjects(cfg) {
         // Root channels
+        await this._ensureChannel('info', 'Info');
         await this._ensureChannel('grid', 'Grid');
         await this._ensureChannel('pv', 'PV');
         await this._ensureChannel('pv.override', 'PV Override');
@@ -2538,11 +2591,14 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureChannel('scenario.suite', 'Test-Suite');
         await this._ensureChannel('report', 'Test-Report');
 
+        // One-time migration marker (prevents repeating migrations on restart)
+        await this._ensureState('info.migration_done', { type: 'boolean', role: 'indicator', read: true, write: false, def: false, name: 'Migration durchgeführt (intern)' });
+
         // Grid states
         await this._ensureState('grid.available', { type: 'boolean', role: 'indicator.reachable', read: true, write: true, def: true });
         await this._ensureState('grid.limit_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: cfg.gridLimitKw, min: 1, max: 5000 });
         await this._ensureState('grid.base_load_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: true, def: cfg.baseLoadKw, min: 0, max: 5000 });
-        await this._ensureState('grid.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('grid.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('grid.over_limit', { type: 'boolean', role: 'indicator.alarm', read: true, write: false, def: false });
 
         // Tariff
@@ -2596,7 +2652,7 @@ class NexowattSimAdapter extends utils.Adapter {
         // PV
         await this._ensureState('pv.installed_kwp', { type: 'number', role: 'value', unit: 'kWp', read: true, write: true, def: cfg.pvInstalledKwp, min: 0, max: 5000 });
         await this._ensureState('pv.weather_factor', { type: 'number', role: 'level', unit: '', read: true, write: true, def: cfg.pvWeatherFactor, min: 0, max: 1 });
-        await this._ensureState('pv.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('pv.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('pv.override.enabled', { type: 'boolean', role: 'switch.enable', read: true, write: true, def: false });
         await this._ensureState('pv.override.power_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: 0, min: 0, max: 100000 });
 
@@ -2605,26 +2661,26 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureState('storage.max_charge_kw', { type: 'number', role: 'value', unit: 'kW', read: true, write: true, def: cfg.storageMaxChargeKw, min: 0, max: 50000 });
         await this._ensureState('storage.max_discharge_kw', { type: 'number', role: 'value', unit: 'kW', read: true, write: true, def: cfg.storageMaxDischargeKw, min: 0, max: 50000 });
         await this._ensureState('storage.soc_pct', { type: 'number', role: 'value.battery', unit: '%', read: true, write: true, def: cfg.storageInitialSocPct, min: 0, max: 100 });
-        await this._ensureState('storage.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('storage.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('storage.ctrl.enabled', { type: 'boolean', role: 'switch.enable', read: true, write: true, def: true });
-        await this._ensureState('storage.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: 0 });
+        await this._ensureState('storage.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'W', read: true, write: true, def: 0 });
 
         // Heatpump / CHP / Generator
-        await this._ensureState('heatpump.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('heatpump.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('heatpump.ctrl.enabled', { type: 'boolean', role: 'switch.enable', read: true, write: true, def: false });
-        await this._ensureState('heatpump.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: 0 });
+        await this._ensureState('heatpump.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'W', read: true, write: true, def: 0 });
 
-        await this._ensureState('chp.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('chp.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('chp.ctrl.enabled', { type: 'boolean', role: 'switch.enable', read: true, write: true, def: false });
-        await this._ensureState('chp.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: 0 });
+        await this._ensureState('chp.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'W', read: true, write: true, def: 0 });
 
-        await this._ensureState('generator.power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('generator.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('generator.ctrl.enabled', { type: 'boolean', role: 'switch.enable', read: true, write: true, def: false });
-        await this._ensureState('generator.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: 0 });
+        await this._ensureState('generator.ctrl.power_set_kw', { type: 'number', role: 'level', unit: 'W', read: true, write: true, def: 0 });
 
         // EVCS totals
         await this._ensureState('evcs.count', { type: 'number', role: 'value', read: true, write: false, def: cfg.chargersCount });
-        await this._ensureState('evcs.total_power_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+        await this._ensureState('evcs.total_power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
         await this._ensureState('evcs.total_energy_kwh', { type: 'number', role: 'value.energy', unit: 'kWh', read: true, write: false, def: 0 });
 
         // EVCS chargers
@@ -2643,7 +2699,7 @@ class NexowattSimAdapter extends utils.Adapter {
             await this._ensureState(`evcs.${id}.meta.max_kw`, { type: 'number', role: 'value', unit: 'kW', read: true, write: false, def: spec.max_kw });
 
             await this._ensureState(`evcs.${id}.ctrl.enabled`, { type: 'boolean', role: 'switch.enable', read: true, write: true, def: false });
-            await this._ensureState(`evcs.${id}.ctrl.limit_kw`, { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: spec.max_kw, min: 0, max: 10000 });
+            await this._ensureState(`evcs.${id}.ctrl.limit_kw`, { type: 'number', role: 'level', unit: 'W', read: true, write: true, def: Math.round(spec.max_kw * 1000), min: 0, max: 10000000 });
             await this._ensureState(`evcs.${id}.ctrl.plugged`, { type: 'boolean', role: 'indicator.connected', read: true, write: true, def: false });
             await this._ensureState(`evcs.${id}.ctrl.priority`, { type: 'number', role: 'value', read: true, write: true, def: 5, min: 1, max: 10 });
             await this._ensureState(`evcs.${id}.ctrl.reset_session`, { type: 'boolean', role: 'button', read: true, write: true, def: false });
@@ -2658,7 +2714,7 @@ class NexowattSimAdapter extends utils.Adapter {
 
             // Measurements (read-only)
             await this._ensureState(`evcs.${id}.meas.status`, { type: 'string', role: 'text', read: true, write: false, def: 'Available' });
-            await this._ensureState(`evcs.${id}.meas.power_kw`, { type: 'number', role: 'value.power', unit: 'kW', read: true, write: false, def: 0 });
+            await this._ensureState(`evcs.${id}.meas.power_kw`, { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
             await this._ensureState(`evcs.${id}.meas.energy_kwh`, { type: 'number', role: 'value.energy', unit: 'kWh', read: true, write: false, def: 0 });
         }
     }
@@ -2685,19 +2741,19 @@ class NexowattSimAdapter extends utils.Adapter {
         const storageMaxDis = clamp(await get('storage.max_discharge_kw', cfg.storageMaxDischargeKw), 0, 50000);
         const storageSoc = clamp(await get('storage.soc_pct', cfg.storageInitialSocPct), 0, 100);
         const storageEnabled = !!(await get('storage.ctrl.enabled', true));
-        const storageSet = Number(await get('storage.ctrl.power_set_kw', 0)) || 0;
+        const storageSet = this._normalizePowerKw(await get('storage.ctrl.power_set_kw', 0));
 
         const tariffMode = String(await get('tariff.mode', 'auto'));
         const tariffPrice = clamp(await get('tariff.price_ct_per_kwh', 30), -500, 500);
 
         const hpEnabled = !!(await get('heatpump.ctrl.enabled', false));
-        const hpSet = Number(await get('heatpump.ctrl.power_set_kw', 0)) || 0;
+        const hpSet = this._normalizePowerKw(await get('heatpump.ctrl.power_set_kw', 0));
 
         const chpEnabled = !!(await get('chp.ctrl.enabled', false));
-        const chpSet = Number(await get('chp.ctrl.power_set_kw', 0)) || 0;
+        const chpSet = this._normalizePowerKw(await get('chp.ctrl.power_set_kw', 0));
 
         const genEnabled = !!(await get('generator.ctrl.enabled', false));
-        const genSet = Number(await get('generator.ctrl.power_set_kw', 0)) || 0;
+        const genSet = this._normalizePowerKw(await get('generator.ctrl.power_set_kw', 0));
 
         // EVCS
         const specs = this._defaultChargerSpecs(cfg.chargersCount);
@@ -2712,7 +2768,7 @@ class NexowattSimAdapter extends utils.Adapter {
 
             const plugged = !!(await get(`evcs.${id}.ctrl.plugged`, pluggedDefault));
             const enabled = !!(await get(`evcs.${id}.ctrl.enabled`, false));
-            const limitKw = clamp(await get(`evcs.${id}.ctrl.limit_kw`, spec.max_kw), 0, 10000);
+            const limitKw = clamp(this._normalizePowerKw(await get(`evcs.${id}.ctrl.limit_kw`, Math.round(spec.max_kw * 1000))), 0, 10000);
             const priority = clamp(await get(`evcs.${id}.ctrl.priority`, 5), 1, 10);
 
             const vehId = String(await get(`evcs.${id}.vehicle.id`, `VEH-${pad2(i)}`));
@@ -3053,7 +3109,7 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._setChanged('grid.available', this._model.grid.available);
         await this._setChanged('grid.limit_kw', this._model.grid.limit_kw);
         await this._setChanged('grid.base_load_kw', this._model.grid.base_load_kw);
-        await this._setChanged('grid.power_kw', Number(this._model.grid.power_kw.toFixed(3)));
+        await this._setChanged('grid.power_kw', Math.round(this._model.grid.power_kw * 1000));
         await this._setChanged('grid.over_limit', this._model.grid.over_limit);
 
         // Tariff
@@ -3064,7 +3120,7 @@ class NexowattSimAdapter extends utils.Adapter {
         // PV
         await this._setChanged('pv.installed_kwp', this._model.pv.installed_kwp);
         await this._setChanged('pv.weather_factor', Number(this._model.pv.weather_factor.toFixed(3)));
-        await this._setChanged('pv.power_kw', Number(this._model.pv.power_kw.toFixed(3)));
+        await this._setChanged('pv.power_kw', Math.round(this._model.pv.power_kw * 1000));
         await this._setChanged('pv.override.enabled', this._model.pv.override.enabled);
         await this._setChanged('pv.override.power_kw', Number(this._model.pv.override.power_kw.toFixed(3)));
 
@@ -3073,22 +3129,22 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._setChanged('storage.max_charge_kw', this._model.storage.max_charge_kw);
         await this._setChanged('storage.max_discharge_kw', this._model.storage.max_discharge_kw);
         await this._setChanged('storage.soc_pct', Number(this._model.storage.soc_pct.toFixed(3)));
-        await this._setChanged('storage.power_kw', Number(this._model.storage.power_kw.toFixed(3)));
+        await this._setChanged('storage.power_kw', Math.round(this._model.storage.power_kw * 1000));
         await this._setChanged('storage.ctrl.enabled', this._model.storage.ctrl.enabled);
-        await this._setChanged('storage.ctrl.power_set_kw', Number((Number(this._model.storage.ctrl.power_set_kw) || 0).toFixed(3)));
+        await this._setChanged('storage.ctrl.power_set_kw', Math.round((Number(this._model.storage.ctrl.power_set_kw) || 0) * 1000));
 
         // Heatpump/CHP/Generator
         for (const dev of ['heatpump', 'chp', 'generator']) {
-            await this._setChanged(`${dev}.power_kw`, Number(this._model[dev].power_kw.toFixed(3)));
+            await this._setChanged(`${dev}.power_kw`, Math.round(this._model[dev].power_kw * 1000));
             await this._setChanged(`${dev}.ctrl.enabled`, this._model[dev].ctrl.enabled);
-            await this._setChanged(`${dev}.ctrl.power_set_kw`, Number((Number(this._model[dev].ctrl.power_set_kw) || 0).toFixed(3)));
+            await this._setChanged(`${dev}.ctrl.power_set_kw`, Math.round((Number(this._model[dev].ctrl.power_set_kw) || 0) * 1000));
         }
 
         // EVCS per charger
         for (const ch of this._model.evcs.chargers) {
             const base = `evcs.${ch.id}`;
             await this._setChanged(`${base}.ctrl.enabled`, ch.ctrl.enabled);
-            await this._setChanged(`${base}.ctrl.limit_kw`, Number(ch.ctrl.limit_kw.toFixed(3)));
+            await this._setChanged(`${base}.ctrl.limit_kw`, Math.round(ch.ctrl.limit_kw * 1000));
             await this._setChanged(`${base}.ctrl.plugged`, ch.ctrl.plugged);
             await this._setChanged(`${base}.ctrl.priority`, ch.ctrl.priority);
 
@@ -3100,14 +3156,14 @@ class NexowattSimAdapter extends utils.Adapter {
             await this._setChanged(`${base}.vehicle.departure_time`, ch.vehicle.departure_time);
 
             await this._setChanged(`${base}.meas.status`, ch.meas.status);
-            await this._setChanged(`${base}.meas.power_kw`, Number(ch.meas.power_kw.toFixed(3)));
+            await this._setChanged(`${base}.meas.power_kw`, Math.round(ch.meas.power_kw * 1000));
             await this._setChanged(`${base}.meas.energy_kwh`, Number(ch.meas.energy_kwh.toFixed(6)));
         }
     }
 
     async _publishAggregates(evTotalPower, evTotalEnergy) {
         await this._setChanged('evcs.count', this._model.evcs.chargers.length);
-        await this._setChanged('evcs.total_power_kw', Number(evTotalPower.toFixed(3)));
+        await this._setChanged('evcs.total_power_kw', Math.round(evTotalPower * 1000));
         await this._setChanged('evcs.total_energy_kwh', Number(evTotalEnergy.toFixed(6)));
     }
 

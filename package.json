@@ -1,6 +1,6 @@
 {
   "name": "iobroker.nexowatt-sim",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "NexoWatt EMS Simulator Adapter (virtual devices for end-to-end testing)",
   "main": "main.js",
   "author": "NexoWatt",

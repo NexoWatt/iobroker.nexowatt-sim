@@ -2,6 +2,10 @@
 
 Dieser Adapter stellt **virtuelle Geräte** bereit, damit du dein **NexoWatt EMS** ohne physische Hardware realistisch testen kannst.
 
+**Wichtiger Hinweis ab v0.4.1:** Alle *Echtzeit-Leistungswerte* (Messwerte + Setpoints, die in die EMS/VIS-Logik laufen) werden in **Watt (W)** geführt – **auch wenn** der State-Name historisch auf `_kw` endet (z.B. `evcs.c01.meas.power_kw = 11000` entspricht 11 kW).
+
+Konfigurations-/Stammdaten wie `grid.limit_kw`, `grid.base_load_kw`, `pv.override.power_kw`, `storage.max_charge_kw`, `meta.max_kw` usw. bleiben weiterhin in kW/kWp/kWh wie beschriftet.
+
 
 **Neu ab v0.3.1:** Die Schnell-Buttons unter `scenario.buttons.*` sind in **Deutsch** benannt (Name-Spalte) und enthalten eine Kurzbeschreibung.
 Enthaltene Simulationen:
@@ -87,16 +91,16 @@ Analog für `c02…c06`.
 Dein EMS schreibt typischerweise:
 
 - `evcs.cXX.ctrl.enabled`
-- `evcs.cXX.ctrl.limit_kw` (oder vergleichbare Limits/Setpoints)
-- `storage.ctrl.power_set_kw` (Charge/Discharge)
+- `evcs.cXX.ctrl.limit_kw` (**W**) – Leistungs-Limit
+- `storage.ctrl.power_set_kw` (**W**) – + Entladen / − Laden
 - etc.
 
 Der Simulator setzt dann:
 
-- `evcs.cXX.meas.power_kw`
+- `evcs.cXX.meas.power_kw` (**W**)
 - `evcs.cXX.vehicle.soc_pct` (steigt)
-- `grid.power_kw` (Import/Export)
-- `storage.soc_pct`, `storage.power_kw`
+- `grid.power_kw` (**W**) (Import/Export)
+- `storage.soc_pct`, `storage.power_kw` (**W**)
 
 ---
 
@@ -106,14 +110,14 @@ Der Simulator setzt dann:
 
 - `grid.limit_kw` (rw)
 - `grid.base_load_kw` (rw)
-- `grid.power_kw` (r) – Netzwirkleistung (+ Import, − Export)
+- `grid.power_kw` (r, **W**) – Netzwirkleistung (+ Import, − Export)
 - `grid.over_limit` (r)
 
 ### PV
 
 - `pv.installed_kwp` (rw)
 - `pv.weather_factor` (rw)
-- `pv.power_kw` (r)
+- `pv.power_kw` (r, **W**)
 
 PV-Override (für Schnelltests):
 
@@ -127,20 +131,20 @@ PV-Override (für Schnelltests):
 - `storage.max_discharge_kw` (rw)
 - `storage.soc_pct` (rw) – manuell setzen möglich
 - `storage.ctrl.enabled` (rw)
-- `storage.ctrl.power_set_kw` (rw) – **+** Entladen / **−** Laden
-- `storage.power_kw` (r)
+- `storage.ctrl.power_set_kw` (rw, **W**) – **+** Entladen / **−** Laden
+- `storage.power_kw` (r, **W**)
 
 ### EVCS
 
 - `evcs.count` (r)
-- `evcs.total_power_kw` (r)
+- `evcs.total_power_kw` (r, **W**)
 
 Pro Ladepunkt `evcs.cXX…`:
 
 - `meta.max_kw` (r)
 - `meta.type` (r) – ac / dc
 - `ctrl.enabled` (rw)
-- `ctrl.limit_kw` (rw)
+- `ctrl.limit_kw` (rw, **W**)
 - `ctrl.plugged` (rw)
 - `vehicle.soc_pct` (rw) – manueller Override möglich
 - `vehicle.capacity_kwh` (rw)
@@ -148,7 +152,7 @@ Pro Ladepunkt `evcs.cXX…`:
 - `vehicle.target_soc_pct` (rw)
 - `vehicle.departure_time` (rw, HH:MM)
 - `meas.status` (r)
-- `meas.power_kw` (r)
+- `meas.power_kw` (r, **W**)
 - `meas.energy_kwh` (r)
 
 ---
