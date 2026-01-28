@@ -112,10 +112,40 @@ class NexowattSimAdapter extends utils.Adapter {
             active: 'baseline',
             running: false,
             started_ms: 0,
+            duration_s: 0,
+            ends_ms: 0,
             phase: 'idle',
             status: 'idle',
             last_applied: '',
             data: {},
+            // runtime flags
+            justFinished: false,
+            justFinishedId: '',
+            justFinishedReason: '',
+            reset_pending: false,
+            reset_at_ms: 0,
+        };
+
+        this._suite = {
+            running: false,
+            suiteId: '',
+            queue: [],
+            index: -1,
+            currentId: '',
+            stage: 'idle', // idle | pause | scenario | done | stopped
+            started_ms: 0,
+            pause_end_ms: 0,
+            status: 'idle',
+            results: [],
+            last_error: '',
+        };
+
+        this._report = {
+            scenarioId: '',
+            started_ms: 0,
+            writes: {},
+            last_json: '',
+            suite_json: '',
         };
 
         this._model = null;
@@ -148,6 +178,12 @@ class NexowattSimAdapter extends utils.Adapter {
                 autoConnectCount: clamp(this.config.autoConnectCount ?? 0, 0, 200),
                 defaultDepartureTime: (this.config.defaultDepartureTime ?? '06:15').toString(),
                 defaultTargetSocPct: clamp(this.config.defaultTargetSocPct ?? 100, 0, 100),
+
+                // Szenario-/Test-Ausführung
+                scenarioDurationSec: clamp(this.config.scenarioDurationSec ?? 300, 30, 86400),
+                scenarioResetPauseSec: clamp(this.config.scenarioResetPauseSec ?? 15, 0, 600),
+                autoResetToBaseline: (this.config.autoResetToBaseline === undefined) ? true : !!this.config.autoResetToBaseline,
+                unitsAutoDetect: (this.config.unitsAutoDetect === undefined) ? true : !!this.config.unitsAutoDetect,
             };
 
             this._cfg = cfg;
@@ -205,6 +241,7 @@ class NexowattSimAdapter extends utils.Adapter {
             }
 
             // Apply and ACK
+            this._reportOnWrite(rel, state.val);
             const applied = this._applyWrite(rel, state.val);
             if (applied) {
                 await this.setStateAsync(rel, { val: state.val, ack: true });
@@ -216,6 +253,19 @@ class NexowattSimAdapter extends utils.Adapter {
             this.log.warn(`stateChange handler error: ${err?.message || err}`);
         }
     }
+
+
+    _normalizePowerKw(value) {
+        let v = Number(value);
+        if (!Number.isFinite(v)) v = 0;
+        // Auto-detect: some controllers may write Watts although the datapoint name ends with _kw.
+        // Heuristic: values above 1000 are treated as W and converted to kW.
+        if (this._cfg && this._cfg.unitsAutoDetect) {
+            if (Math.abs(v) > 1000) v = v / 1000;
+        }
+        return v;
+    }
+
 
     _applyWrite(relId, value) {
         if (!this._model) return false;
@@ -285,7 +335,7 @@ class NexowattSimAdapter extends utils.Adapter {
             return true;
         }
         if (relId === 'storage.ctrl.power_set_kw') {
-            this._model.storage.ctrl.power_set_kw = Number(value) || 0;
+            this._model.storage.ctrl.power_set_kw = this._normalizePowerKw(value);
             return true;
         }
 
@@ -296,7 +346,7 @@ class NexowattSimAdapter extends utils.Adapter {
                 return true;
             }
             if (relId === `${dev}.ctrl.power_set_kw`) {
-                this._model[dev].ctrl.power_set_kw = Number(value) || 0;
+                this._model[dev].ctrl.power_set_kw = this._normalizePowerKw(value);
                 return true;
             }
         }
@@ -315,7 +365,7 @@ class NexowattSimAdapter extends utils.Adapter {
                 return true;
             }
             if (tail === 'ctrl.limit_kw') {
-                charger.ctrl.limit_kw = clamp(value, 0, 10000);
+                charger.ctrl.limit_kw = clamp(this._normalizePowerKw(value), 0, 10000);
                 return true;
             }
             if (tail === 'ctrl.plugged') {
@@ -381,6 +431,21 @@ class NexowattSimAdapter extends utils.Adapter {
         return [
             // --- Test-Suites ---
             {
+                id: 'suite_all_scenarios_5min',
+                title: 'Test-Suite: ALLE Szenarien (je 5 Minuten)',
+                kind: 'suite',
+                duration_s: 0,
+                description: 'Spielt automatisch alle Szenarien nacheinander ab (je 5 Minuten). Zwischen den Szenarien wird automatisch auf den Basiszustand zurückgesetzt (Pause laut Konfiguration).',
+            },
+            {
+                id: 'suite_stop',
+                title: 'Test-Suite: STOP (sofort)',
+                kind: 'suite',
+                duration_s: 0,
+                description: 'Stoppt eine laufende Test-Suite sofort und setzt auf den Basiszustand zurück.',
+            },
+            {
+
                 id: 'suite_smoke_all',
                 title: 'Test-Suite: Schnelltest (kompakt)',
                 kind: 'timeline',
@@ -620,8 +685,34 @@ class NexowattSimAdapter extends utils.Adapter {
             this._scenario.active = this._scenario.selected;
             this._scenario.running = false;
             this._scenario.started_ms = 0;
+            this._scenario.duration_s = 0;
+            this._scenario.ends_ms = 0;
             this._scenario.phase = 'idle';
             this._scenario.status = 'idle';
+            this._scenario.data = {};
+            this._scenario.justFinished = false;
+            this._scenario.justFinishedId = '';
+            this._scenario.justFinishedReason = '';
+            this._scenario.reset_pending = false;
+            this._scenario.reset_at_ms = 0;
+
+            // Suite resets on adapter start
+            this._suite.running = false;
+            this._suite.suiteId = '';
+            this._suite.queue = [];
+            this._suite.index = -1;
+            this._suite.currentId = '';
+            this._suite.stage = 'idle';
+            this._suite.started_ms = 0;
+            this._suite.pause_end_ms = 0;
+            this._suite.status = 'idle';
+            this._suite.results = [];
+            this._suite.last_error = '';
+
+            // Report
+            this._report.scenarioId = '';
+            this._report.started_ms = 0;
+            this._report.writes = {};
 
             const catalog = this._scenarioDefinitions();
             await this.setStateAsync('scenario.catalog_json', { val: JSON.stringify(catalog, null, 2), ack: true });
@@ -652,8 +743,22 @@ class NexowattSimAdapter extends utils.Adapter {
 
                 const scenarioId = this._normalizeScenarioId(relId.substring('scenario.buttons.'.length));
                 const def = this._scenarioDefinitions().find(s => s.id === scenarioId);
-                const start = def?.kind === 'timeline';
-                await this._applyScenario(scenarioId, { start });
+
+                // Suite controls
+                if (def?.kind === 'suite' || scenarioId === 'suite_all_scenarios_5min' || scenarioId === 'suite_stop') {
+                    if (scenarioId === 'suite_stop') {
+                        await this._stopSuite('user');
+                    } else {
+                        await this._startSuiteAll();
+                    }
+                } else {
+                    // Manual scenario start stops any running suite
+                    if (this._suite && this._suite.running) {
+                        await this._stopSuite('manual_scenario');
+                    }
+                    const start = scenarioId !== 'baseline';
+                    await this._applyScenario(scenarioId, { start });
+                }
 
                 // Auto-reset button to false so it can be clicked again
                 await this.setStateAsync(relId, { val: false, ack: true });
@@ -666,12 +771,31 @@ class NexowattSimAdapter extends utils.Adapter {
             if (!isPressed) return;
 
             if (relId === 'scenario.ctrl.apply') {
+                // Apply without running (helper)
+                if (this._suite && this._suite.running) {
+                    await this._stopSuite('user');
+                }
                 await this._applyScenario(this._scenario.selected, { start: false });
             } else if (relId === 'scenario.ctrl.start') {
-                await this._applyScenario(this._scenario.selected, { start: true });
+                const sel = this._normalizeScenarioId(this._scenario.selected);
+                if (sel === 'suite_stop') {
+                    await this._stopSuite('user');
+                } else if (sel === 'suite_all_scenarios_5min') {
+                    await this._startSuiteAll();
+                } else {
+                    // Manual scenario start stops any running suite
+                    if (this._suite && this._suite.running) {
+                        await this._stopSuite('manual_scenario');
+                    }
+                    await this._applyScenario(sel, { start: sel !== 'baseline' });
+                }
             } else if (relId === 'scenario.ctrl.stop') {
+                // Stop everything
+                await this._stopSuite('user');
                 await this._stopScenario('user');
             } else if (relId === 'scenario.ctrl.reset') {
+                // Reset everything to baseline
+                await this._stopSuite('user');
                 await this._applyScenario('baseline', { start: false });
             } else {
                 // unknown scenario control -> just ack
@@ -685,13 +809,57 @@ class NexowattSimAdapter extends utils.Adapter {
     }
 
     async _publishScenarioStates() {
-        const elapsed = (this._scenario.running && this._scenario.started_ms) ? ((Date.now() - this._scenario.started_ms) / 1000) : 0;
+        const nowMs = Date.now();
+
+        const elapsed = (this._scenario.running && this._scenario.started_ms) ? ((nowMs - this._scenario.started_ms) / 1000) : 0;
+        const duration = Number(this._scenario.duration_s) || 0;
+        const remaining = (this._scenario.running && duration > 0) ? Math.max(0, duration - elapsed) : 0;
+
         await this._setChanged('scenario.selected', this._scenario.selected);
         await this._setChanged('scenario.active', this._scenario.active);
         await this._setChanged('scenario.running', this._scenario.running);
         await this._setChanged('scenario.phase', this._scenario.phase);
         await this._setChanged('scenario.elapsed_s', Number(elapsed.toFixed(1)));
+        await this._setChanged('scenario.duration_s', duration);
+        await this._setChanged('scenario.remaining_s', Number(remaining.toFixed(1)));
         await this._setChanged('scenario.status', this._scenario.status);
+
+        // Suite states
+        const suiteElapsed = (this._suite && this._suite.running && this._suite.started_ms) ? ((nowMs - this._suite.started_ms) / 1000) : 0;
+        const suiteTotal = this._suite?.queue?.length || 0;
+        const suiteCompleted = this._suite?.results?.length || 0;
+        const suitePct = suiteTotal ? (suiteCompleted / suiteTotal) * 100 : 0;
+
+        await this._setChanged('scenario.suite.running', !!this._suite?.running);
+        await this._setChanged('scenario.suite.stage', this._suite?.stage || 'idle');
+        await this._setChanged('scenario.suite.current_id', this._suite?.currentId || '');
+        await this._setChanged('scenario.suite.index', (this._suite && this._suite.index >= 0) ? (this._suite.index + 1) : 0);
+        await this._setChanged('scenario.suite.total', suiteTotal);
+        await this._setChanged('scenario.suite.elapsed_s', Number(suiteElapsed.toFixed(1)));
+        await this._setChanged('scenario.suite.status', this._suite?.status || 'idle');
+        await this._setChanged('scenario.suite.progress_pct', Number(suitePct.toFixed(1)));
+
+        // Current report (lightweight)
+        const reportCurrent = {
+            scenario: {
+                id: this._scenario.active,
+                running: this._scenario.running,
+                elapsed_s: Number(elapsed.toFixed(1)),
+                duration_s: duration,
+                remaining_s: Number(remaining.toFixed(1)),
+                status: this._scenario.status,
+            },
+            suite: {
+                running: !!this._suite?.running,
+                stage: this._suite?.stage || 'idle',
+                index: (this._suite && this._suite.index >= 0) ? (this._suite.index + 1) : 0,
+                total: suiteTotal,
+                completed: suiteCompleted,
+            },
+            writes: this._report?.writes || {},
+        };
+
+        await this._setChanged('report.current_json', JSON.stringify(reportCurrent));
     }
 
     async _applyScenario(scenarioId, { start } = { start: false }) {
@@ -710,11 +878,25 @@ class NexowattSimAdapter extends utils.Adapter {
         // Stop any running scenario first
         this._scenario.running = false;
         this._scenario.started_ms = 0;
+        this._scenario.duration_s = 0;
+        this._scenario.ends_ms = 0;
         this._scenario.phase = 'applying';
         this._scenario.status = `applying ${id}`;
 
-        // Reset per-scenario runtime data
-       switch (id) {
+        // Reset runtime flags / pending resets
+        this._scenario.data = {};
+        this._scenario.justFinished = false;
+        this._scenario.justFinishedId = '';
+        this._scenario.justFinishedReason = '';
+        this._scenario.reset_pending = false;
+        this._scenario.reset_at_ms = 0;
+
+        // Reset report (will be activated on start)
+        this._report.scenarioId = '';
+        this._report.started_ms = 0;
+        this._report.writes = {};
+
+        switch (id) {
             case 'baseline':
                 this._resetToDefaultsModel();
                 break;
@@ -842,14 +1024,22 @@ class NexowattSimAdapter extends utils.Adapter {
         this._scenario.active = id;
         this._scenario.last_applied = new Date(nowMs).toISOString();
 
-        if (start) {
+        const doStart = start && id !== 'baseline';
+        if (doStart) {
+            const dur = clamp(this._cfg.scenarioDurationSec ?? 300, 30, 86400);
             this._scenario.running = true;
             this._scenario.started_ms = nowMs;
+            this._scenario.duration_s = dur;
+            this._scenario.ends_ms = nowMs + dur * 1000;
             this._scenario.phase = 'running';
-            this._scenario.status = `running ${id}`;
+            this._scenario.status = `running ${id} (${dur}s)`;
+
+            this._reportStart(id, nowMs);
         } else {
             this._scenario.running = false;
             this._scenario.started_ms = 0;
+            this._scenario.duration_s = 0;
+            this._scenario.ends_ms = 0;
             this._scenario.phase = 'applied';
             this._scenario.status = `applied ${id}`;
         }
@@ -860,10 +1050,299 @@ class NexowattSimAdapter extends utils.Adapter {
     async _stopScenario(reason = 'user') {
         this._scenario.running = false;
         this._scenario.started_ms = 0;
+        this._scenario.duration_s = 0;
+        this._scenario.ends_ms = 0;
+        this._scenario.justFinished = false;
+        this._scenario.justFinishedId = '';
+        this._scenario.justFinishedReason = '';
+        this._scenario.reset_pending = false;
+        this._scenario.reset_at_ms = 0;
         this._scenario.phase = 'stopped';
         this._scenario.status = `stopped (${reason})`;
+
+        // Reset report
+        this._report.scenarioId = '';
+        this._report.started_ms = 0;
+        this._report.writes = {};
+
         await this._publishScenarioStates();
     }
+
+    // ---------------------------------------------------------------------
+    // Test report / write tracking
+    // ---------------------------------------------------------------------
+
+    _reportStart(scenarioId, nowMs) {
+        this._report.scenarioId = scenarioId;
+        this._report.started_ms = nowMs;
+        this._report.writes = {
+            total: 0,
+            evcs_limit: 0,
+            evcs_enable: 0,
+            evcs_plug: 0,
+            storage_power: 0,
+            storage_enable: 0,
+            heatpump: 0,
+            chp: 0,
+            generator: 0,
+            grid_limit: 0,
+            tariff: 0,
+            pv_override: 0,
+            other: 0,
+            last_write_id: '',
+            last_write_val: null,
+            last_write_ms: 0,
+        };
+    }
+
+    _reportOnWrite(relId, value) {
+        // Track writes only while a scenario (or suite) is running
+        if (!(this._scenario && this._scenario.running) && !(this._suite && this._suite.running)) return;
+        if (!this._report || !this._report.writes) return;
+
+        const w = this._report.writes;
+
+        w.total = (w.total || 0) + 1;
+        w.last_write_id = relId;
+        w.last_write_val = value;
+        w.last_write_ms = Date.now();
+
+        // Categorize
+        if (/^evcs\.c\d{2}\.ctrl\.limit_kw$/.test(relId)) w.evcs_limit = (w.evcs_limit || 0) + 1;
+        else if (/^evcs\.c\d{2}\.ctrl\.enabled$/.test(relId)) w.evcs_enable = (w.evcs_enable || 0) + 1;
+        else if (/^evcs\.c\d{2}\.ctrl\.plugged$/.test(relId)) w.evcs_plug = (w.evcs_plug || 0) + 1;
+        else if (relId === 'storage.ctrl.power_set_kw') w.storage_power = (w.storage_power || 0) + 1;
+        else if (relId === 'storage.ctrl.enabled') w.storage_enable = (w.storage_enable || 0) + 1;
+        else if (relId === 'heatpump.ctrl.power_set_kw' || relId === 'heatpump.ctrl.enabled') w.heatpump = (w.heatpump || 0) + 1;
+        else if (relId === 'chp.ctrl.power_set_kw' || relId === 'chp.ctrl.enabled') w.chp = (w.chp || 0) + 1;
+        else if (relId === 'generator.ctrl.power_set_kw' || relId === 'generator.ctrl.enabled') w.generator = (w.generator || 0) + 1;
+        else if (relId === 'grid.limit_kw') w.grid_limit = (w.grid_limit || 0) + 1;
+        else if (relId === 'tariff.mode' || relId === 'tariff.price_ct_per_kwh') w.tariff = (w.tariff || 0) + 1;
+        else if (relId === 'pv.override.enabled' || relId === 'pv.override.power_kw') w.pv_override = (w.pv_override || 0) + 1;
+        else w.other = (w.other || 0) + 1;
+
+        this._report.writes = w;
+    }
+
+    _buildScenarioReport(nowMs, reason = 'done') {
+        const id = this._report.scenarioId || this._scenario.active || '';
+        const def = this._scenarioDefinitions().find(s => s.id === id);
+        const started = this._report.started_ms || 0;
+        const elapsed = started ? ((nowMs - started) / 1000) : 0;
+
+        return {
+            scenario: {
+                id,
+                title: def?.title || id,
+                kind: def?.kind || 'unknown',
+            },
+            started_iso: started ? new Date(started).toISOString() : null,
+            ended_iso: new Date(nowMs).toISOString(),
+            elapsed_s: Number(elapsed.toFixed(1)),
+            configured_duration_s: this._cfg?.scenarioDurationSec ?? null,
+            reason,
+            writes: this._report.writes || {},
+            suite: (this._suite && this._suite.running) ? {
+                suiteId: this._suite.suiteId,
+                index: this._suite.index,
+                total: this._suite.queue?.length || 0,
+            } : null,
+        };
+    }
+
+    async _handleScenarioFinished(nowMs) {
+        if (!this._scenario.justFinished) return;
+
+        const finishedId = this._scenario.justFinishedId || this._scenario.active;
+        const reason = this._scenario.justFinishedReason || 'timeout';
+
+        // Finalize report
+        const summary = this._buildScenarioReport(nowMs, reason);
+        summary.scenario.id = finishedId;
+
+        this._report.last_json = JSON.stringify(summary, null, 2);
+        await this._setChanged('report.last_json', this._report.last_json);
+
+        // Suite step handling
+        if (this._suite && this._suite.running && this._suite.stage === 'scenario' && this._suite.currentId === finishedId) {
+            this._suite.results.push(summary);
+
+            // Reset to baseline immediately, then pause before next scenario
+            await this._applyScenario('baseline', { start: false });
+
+            this._suite.stage = 'pause';
+            this._suite.currentId = '';
+            this._suite.pause_end_ms = nowMs + ((this._cfg?.scenarioResetPauseSec ?? 0) * 1000);
+            this._suite.status = `pause (${this._suite.index + 1}/${this._suite.queue.length})`;
+        } else {
+            // Auto reset back to baseline after a pause
+            if (this._cfg && this._cfg.autoResetToBaseline) {
+                this._scenario.reset_pending = true;
+                this._scenario.reset_at_ms = nowMs + ((this._cfg?.scenarioResetPauseSec ?? 0) * 1000);
+                this._scenario.status = `done ${finishedId} (auto reset in ${this._cfg?.scenarioResetPauseSec ?? 0}s)`;
+            }
+        }
+
+        // Clear finish flags
+        this._scenario.justFinished = false;
+        this._scenario.justFinishedId = '';
+        this._scenario.justFinishedReason = '';
+
+        // Stop accumulating writes after finish
+        this._report.scenarioId = '';
+
+        await this._publishScenarioStates();
+    }
+
+    async _processPendingResets(nowMs) {
+        if (this._suite && this._suite.running) return;
+        if (!this._scenario.reset_pending) return;
+        if (nowMs < (this._scenario.reset_at_ms || 0)) return;
+
+        // Execute reset
+        this._scenario.reset_pending = false;
+        this._scenario.reset_at_ms = 0;
+        await this._applyScenario('baseline', { start: false });
+    }
+
+    // ---------------------------------------------------------------------
+    // Suite runner: runs all scenarios sequentially
+    // ---------------------------------------------------------------------
+
+    async _startSuiteAll() {
+        if (!this._model || !this._cfg) return;
+
+        // Stop current suite if any
+        if (this._suite && this._suite.running) {
+            await this._stopSuite('restart');
+        }
+
+        // Stop scenario and clear pending resets
+        this._scenario.running = false;
+        this._scenario.started_ms = 0;
+        this._scenario.duration_s = 0;
+        this._scenario.ends_ms = 0;
+        this._scenario.reset_pending = false;
+        this._scenario.reset_at_ms = 0;
+        this._scenario.justFinished = false;
+        this._scenario.justFinishedId = '';
+        this._scenario.justFinishedReason = '';
+
+        // Build queue: all non-suite, non-baseline scenarios in catalog order
+        const defs = this._scenarioDefinitions();
+        const queue = defs
+            .filter(d => d && d.id && d.id !== 'baseline' && d.kind !== 'suite' && !String(d.id).startsWith('suite_'))
+            .map(d => d.id);
+
+        const startedMs = Date.now();
+        this._suite.running = true;
+        this._suite.suiteId = 'suite_all_scenarios_5min';
+        this._suite.queue = queue;
+        this._suite.index = -1;
+        this._suite.currentId = '';
+        this._suite.stage = 'pause';
+        this._suite.started_ms = startedMs;
+        this._suite.pause_end_ms = startedMs + ((this._cfg?.scenarioResetPauseSec ?? 0) * 1000);
+        this._suite.status = `started (0/${queue.length})`;
+        this._suite.results = [];
+        this._suite.last_error = '';
+
+        // Apply baseline immediately
+        await this._applyScenario('baseline', { start: false });
+
+        // Initialize suite report
+        const suiteSummary = {
+            suiteId: this._suite.suiteId,
+            started_iso: new Date(startedMs).toISOString(),
+            scenario_duration_s: this._cfg.scenarioDurationSec,
+            pause_s: this._cfg.scenarioResetPauseSec,
+            total: queue.length,
+            results: [],
+        };
+        this._report.suite_json = JSON.stringify(suiteSummary, null, 2);
+        await this._setChanged('report.suite_json', this._report.suite_json);
+
+        await this._publishScenarioStates();
+    }
+
+    async _stopSuite(reason = 'user') {
+        if (!this._suite || !this._suite.running) return;
+
+        const nowMs = Date.now();
+
+        this._suite.running = false;
+        this._suite.stage = 'stopped';
+        this._suite.status = `stopped (${reason})`;
+
+        // Suite report
+        const suiteSummary = {
+            suiteId: this._suite.suiteId,
+            reason,
+            started_iso: this._suite.started_ms ? new Date(this._suite.started_ms).toISOString() : null,
+            ended_iso: new Date(nowMs).toISOString(),
+            scenario_duration_s: this._cfg?.scenarioDurationSec ?? null,
+            pause_s: this._cfg?.scenarioResetPauseSec ?? null,
+            total: this._suite.queue?.length || 0,
+            completed: this._suite.results?.length || 0,
+            results: this._suite.results || [],
+        };
+
+        this._report.suite_json = JSON.stringify(suiteSummary, null, 2);
+        await this._setChanged('report.suite_json', this._report.suite_json);
+
+        // Reset to baseline
+        await this._applyScenario('baseline', { start: false });
+        await this._publishScenarioStates();
+    }
+
+    async _suiteTick(nowMs) {
+        if (!this._suite || !this._suite.running) return;
+
+        if (this._suite.stage === 'pause') {
+            if (nowMs < (this._suite.pause_end_ms || 0)) return;
+
+            const nextIndex = (this._suite.index ?? -1) + 1;
+            const total = this._suite.queue?.length || 0;
+
+            if (nextIndex >= total) {
+                // Suite complete
+                this._suite.running = false;
+                this._suite.stage = 'done';
+                this._suite.status = `done (${total})`;
+
+                const suiteSummary = {
+                    suiteId: this._suite.suiteId,
+                    started_iso: this._suite.started_ms ? new Date(this._suite.started_ms).toISOString() : null,
+                    ended_iso: new Date(nowMs).toISOString(),
+                    scenario_duration_s: this._cfg?.scenarioDurationSec ?? null,
+                    pause_s: this._cfg?.scenarioResetPauseSec ?? null,
+                    total,
+                    completed: this._suite.results?.length || 0,
+                    results: this._suite.results || [],
+                };
+
+                this._report.suite_json = JSON.stringify(suiteSummary, null, 2);
+                await this._setChanged('report.suite_json', this._report.suite_json);
+
+                // Ensure baseline at the end
+                await this._applyScenario('baseline', { start: false });
+                await this._publishScenarioStates();
+                return;
+            }
+
+            // Start next scenario
+            this._suite.index = nextIndex;
+            const id = this._suite.queue[nextIndex];
+            this._suite.currentId = id;
+            this._suite.stage = 'scenario';
+            this._suite.status = `running ${id} (${nextIndex + 1}/${total})`;
+
+            await this._applyScenario(id, { start: true });
+        }
+        // In 'scenario' stage we wait for _handleScenarioFinished() to move us back to 'pause'
+    }
+
+
 
     _resetToDefaultsModel() {
         const cfg = this._cfg;
@@ -2010,15 +2489,28 @@ class NexowattSimAdapter extends utils.Adapter {
                 break;
         }
 
+        // Enforce global duration (e.g., 5 minutes) for every scenario run.
+        const duration = Number(this._scenario.duration_s) || 0;
+
+        // If a timeline ends early, keep the last state stable until the global duration expires.
+        if (phase === 'done' && duration > 0 && elapsed < duration) {
+            phase = 'running';
+            status = `${status} (stabilisiert)`;
+        }
+
         this._scenario.status = status;
         this._scenario.phase = phase;
 
-        if (phase === 'done') {
-            // Auto-stop
+        // End scenario when the global duration is reached
+        if (duration > 0 && elapsed >= duration) {
             this._scenario.running = false;
             this._scenario.started_ms = 0;
+            this._scenario.ends_ms = 0;
             this._scenario.phase = 'done';
             this._scenario.status = `done ${id}`;
+            this._scenario.justFinished = true;
+            this._scenario.justFinishedId = id;
+            this._scenario.justFinishedReason = 'timeout';
         }
     }
 
@@ -2043,6 +2535,8 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureChannel('scenario', 'Testszenarien');
         await this._ensureChannel('scenario.ctrl', 'Szenario-Steuerung');
         await this._ensureChannel('scenario.buttons', 'Schnell-Buttons');
+        await this._ensureChannel('scenario.suite', 'Test-Suite');
+        await this._ensureChannel('report', 'Test-Report');
 
         // Grid states
         await this._ensureState('grid.available', { type: 'boolean', role: 'indicator.reachable', read: true, write: true, def: true });
@@ -2068,8 +2562,25 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureState('scenario.running', { type: 'boolean', role: 'indicator.working', read: true, write: false, def: false });
         await this._ensureState('scenario.phase', { type: 'string', role: 'text', read: true, write: false, def: 'idle' });
         await this._ensureState('scenario.elapsed_s', { type: 'number', role: 'value.time', unit: 's', read: true, write: false, def: 0 });
+        await this._ensureState('scenario.duration_s', { type: 'number', role: 'value.time', unit: 's', read: true, write: false, def: cfg.scenarioDurationSec ?? 300 });
+        await this._ensureState('scenario.remaining_s', { type: 'number', role: 'value.time', unit: 's', read: true, write: false, def: 0 });
         await this._ensureState('scenario.status', { type: 'string', role: 'text', read: true, write: false, def: 'idle' });
         await this._ensureState('scenario.catalog_json', { type: 'string', role: 'json', read: true, write: false, def: '[]' });
+
+        // Suite status
+        await this._ensureState('scenario.suite.running', { type: 'boolean', role: 'indicator.running', read: true, write: false, def: false });
+        await this._ensureState('scenario.suite.stage', { type: 'string', role: 'text', read: true, write: false, def: 'idle' });
+        await this._ensureState('scenario.suite.current_id', { type: 'string', role: 'text', read: true, write: false, def: '' });
+        await this._ensureState('scenario.suite.index', { type: 'number', role: 'value', read: true, write: false, def: 0 });
+        await this._ensureState('scenario.suite.total', { type: 'number', role: 'value', read: true, write: false, def: 0 });
+        await this._ensureState('scenario.suite.elapsed_s', { type: 'number', role: 'value.time', unit: 's', read: true, write: false, def: 0 });
+        await this._ensureState('scenario.suite.status', { type: 'string', role: 'text', read: true, write: false, def: 'idle' });
+        await this._ensureState('scenario.suite.progress_pct', { type: 'number', role: 'value', unit: '%', read: true, write: false, def: 0 });
+
+        // Report (JSON)
+        await this._ensureState('report.current_json', { type: 'string', role: 'json', read: true, write: false, def: '{}' });
+        await this._ensureState('report.last_json', { type: 'string', role: 'json', read: true, write: false, def: '{}' });
+        await this._ensureState('report.suite_json', { type: 'string', role: 'json', read: true, write: false, def: '{}' });
 
         await this._ensureState('scenario.ctrl.apply', { type: 'boolean', role: 'button', read: true, write: true, def: false });
         await this._ensureState('scenario.ctrl.start', { type: 'boolean', role: 'button', read: true, write: true, def: false });
@@ -2297,8 +2808,17 @@ class NexowattSimAdapter extends utils.Adapter {
 
         const now = new Date(nowMs);
 
+        // Pending auto-reset back to baseline (single-scenario runs)
+        await this._processPendingResets(nowMs);
+
+        // Suite runner (may start next scenario)
+        await this._suiteTick(nowMs);
+
         // Scenario engine (time-based modifications)
         this._runScenarioTimeline(nowMs, dtSec, now);
+
+        // Scenario finished? -> auto-reset/suite-step/report
+        await this._handleScenarioFinished(nowMs);
 
         // Tariff
         // We generate both the current price and a simple forward curve.
@@ -2477,14 +2997,57 @@ class NexowattSimAdapter extends utils.Adapter {
     }
 
     async _publish(now) {
-        // Scenario
-        const elapsed = (this._scenario.running && this._scenario.started_ms) ? ((Date.now() - this._scenario.started_ms) / 1000) : 0;
+        // Scenario / suite
+        const nowMs = Date.now();
+        const elapsed = (this._scenario.running && this._scenario.started_ms) ? ((nowMs - this._scenario.started_ms) / 1000) : 0;
+        const duration = Number(this._scenario.duration_s) || 0;
+        const remaining = (this._scenario.running && duration > 0) ? Math.max(0, duration - elapsed) : 0;
+
         await this._setChanged('scenario.selected', this._scenario.selected);
         await this._setChanged('scenario.active', this._scenario.active);
         await this._setChanged('scenario.running', this._scenario.running);
         await this._setChanged('scenario.phase', this._scenario.phase);
         await this._setChanged('scenario.elapsed_s', Number(elapsed.toFixed(1)));
+        await this._setChanged('scenario.duration_s', duration);
+        await this._setChanged('scenario.remaining_s', Number(remaining.toFixed(1)));
         await this._setChanged('scenario.status', this._scenario.status);
+
+        // Suite states
+        const suiteElapsed = (this._suite && this._suite.running && this._suite.started_ms) ? ((nowMs - this._suite.started_ms) / 1000) : 0;
+        const suiteTotal = this._suite?.queue?.length || 0;
+        const suiteCompleted = this._suite?.results?.length || 0;
+        const suitePct = suiteTotal ? (suiteCompleted / suiteTotal) * 100 : 0;
+
+        await this._setChanged('scenario.suite.running', !!this._suite?.running);
+        await this._setChanged('scenario.suite.stage', this._suite?.stage || 'idle');
+        await this._setChanged('scenario.suite.current_id', this._suite?.currentId || '');
+        await this._setChanged('scenario.suite.index', (this._suite && this._suite.index >= 0) ? (this._suite.index + 1) : 0);
+        await this._setChanged('scenario.suite.total', suiteTotal);
+        await this._setChanged('scenario.suite.elapsed_s', Number(suiteElapsed.toFixed(1)));
+        await this._setChanged('scenario.suite.status', this._suite?.status || 'idle');
+        await this._setChanged('scenario.suite.progress_pct', Number(suitePct.toFixed(1)));
+
+        // Current report (lightweight)
+        const reportCurrent = {
+            scenario: {
+                id: this._scenario.active,
+                running: this._scenario.running,
+                elapsed_s: Number(elapsed.toFixed(1)),
+                duration_s: duration,
+                remaining_s: Number(remaining.toFixed(1)),
+                status: this._scenario.status,
+            },
+            suite: {
+                running: !!this._suite?.running,
+                stage: this._suite?.stage || 'idle',
+                index: (this._suite && this._suite.index >= 0) ? (this._suite.index + 1) : 0,
+                total: suiteTotal,
+                completed: suiteCompleted,
+            },
+            writes: this._report?.writes || {},
+        };
+
+        await this._setChanged('report.current_json', JSON.stringify(reportCurrent));
 
         // Grid
         await this._setChanged('grid.available', this._model.grid.available);
