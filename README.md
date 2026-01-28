@@ -110,7 +110,12 @@ Der Simulator setzt dann:
 
 - `grid.limit_kw` (rw)
 - `grid.base_load_kw` (rw)
-- `grid.power_kw` (r, **W**) – Netzwirkleistung (+ Import, − Export)
+- `grid.power_kw` (r, **W**) – Netzwirkleistung (+ Bezug, − Einspeisung)
+- `grid.buy_w` (r, **W**) – Netz **Bezug** (nur positiv)
+- `grid.sell_w` (r, **W**) – Netz **Einspeisung** (nur positiv)
+- `grid.utilization_pct` (r, %) – Auslastung am NVP (max(Bezug,Einspeisung) / Limit)
+- `grid.ampel` (r) – GRUEN/GELB/ROT
+- `grid.ampel_text` (r) – Kurzbegründung
 - `grid.over_limit` (r)
 
 ### PV

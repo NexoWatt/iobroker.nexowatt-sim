@@ -2891,6 +2891,13 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureState('grid.limit_kw', { type: 'number', role: 'level', unit: 'kW', read: true, write: true, def: cfg.gridLimitKw, min: 1, max: 5000 });
         await this._ensureState('grid.base_load_kw', { type: 'number', role: 'value.power', unit: 'kW', read: true, write: true, def: cfg.baseLoadKw, min: 0, max: 5000 });
         await this._ensureState('grid.power_kw', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0 });
+        await this._ensureState('grid.buy_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Netz Bezug (W)' });
+        await this._ensureState('grid.sell_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Netz Einspeisung (W)' });
+        await this._ensureState('grid.utilization_pct', { type: 'number', role: 'value.percent', unit: '%', read: true, write: false, def: 0, name: 'Netzlast Auslastung (%)' });
+        await this._ensureState('grid.ampel', { type: 'string', role: 'text', read: true, write: false, def: 'GRUEN', name: 'Ampel' });
+        await this._ensureState('grid.ampel_code', { type: 'number', role: 'value', read: true, write: false, def: 0, name: 'Ampel Code (0=grün, 1=gelb, 2=rot)' });
+        await this._ensureState('grid.ampel_text', { type: 'string', role: 'text', read: true, write: false, def: '', name: 'Ampel Details' });
+
         await this._ensureState('grid.over_limit', { type: 'boolean', role: 'indicator.alarm', read: true, write: false, def: false });
 
         // Tariff
@@ -3397,11 +3404,42 @@ class NexowattSimAdapter extends utils.Adapter {
 
         await this._setChanged('report.current_json', JSON.stringify(reportCurrent));
 
-        // Grid
+        // Grid / NVP (Netzverknüpfungspunkt)
+        const netW = Math.round(this._model.grid.power_kw * 1000); // +Bezug, -Einspeisung
+        const buyW = netW > 0 ? netW : 0; // Bezug (W)
+        const sellW = netW < 0 ? -netW : 0; // Einspeisung (W)
+        const limitW = Math.max(1, Math.round(this._model.grid.limit_kw * 1000));
+        const maxAbsW = Math.max(buyW, sellW);
+        const utilPct = limitW ? (maxAbsW / limitW) * 100 : 0;
+
+        let ampelCode = 0; // 0=GRUEN, 1=GELB, 2=ROT
+        let ampel = 'GRUEN';
+        let ampelText = 'OK';
+
+        if (!this._model.grid.available) {
+            ampelCode = 2;
+            ampel = 'ROT';
+            ampelText = 'Netz nicht verfügbar';
+        } else if (maxAbsW > limitW + 1e-6) {
+            ampelCode = 2;
+            ampel = 'ROT';
+            ampelText = `Grenzwert überschritten (${maxAbsW}W > ${limitW}W)`;
+        } else if (maxAbsW > limitW * 0.9) {
+            ampelCode = 1;
+            ampel = 'GELB';
+            ampelText = `Nahe am Grenzwert (${maxAbsW}W / ${limitW}W)`;
+        }
+
         await this._setChanged('grid.available', this._model.grid.available);
         await this._setChanged('grid.limit_kw', this._model.grid.limit_kw);
         await this._setChanged('grid.base_load_kw', this._model.grid.base_load_kw);
-        await this._setChanged('grid.power_kw', Math.round(this._model.grid.power_kw * 1000));
+        await this._setChanged('grid.power_kw', netW);
+        await this._setChanged('grid.buy_w', buyW);
+        await this._setChanged('grid.sell_w', sellW);
+        await this._setChanged('grid.utilization_pct', Number(utilPct.toFixed(1)));
+        await this._setChanged('grid.ampel', ampel);
+        await this._setChanged('grid.ampel_code', ampelCode);
+        await this._setChanged('grid.ampel_text', ampelText);
         await this._setChanged('grid.over_limit', this._model.grid.over_limit);
 
         // Tariff

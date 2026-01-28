@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "nexowatt-sim",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "title": "NexoWatt EMS Simulator",
     "titleLang": {
       "en": "NexoWatt EMS Simulator",
@@ -57,6 +57,10 @@
       "0.5.0": {
         "en": "Closed-loop VIS integration for automated scenario testing (goals/settings sync + status snapshot).",
         "de": "Closed-Loop VIS-Integration für automatisierte Szenario-Tests (Goals/Settings Sync + Status-Snapshot)."
+      },
+      "0.6.0": {
+        "en": "Add NVP import/export datapoints (grid buy/sell) plus traffic-light status/utilization for fast validation.",
+        "de": "NVP/Netz-Bezug & Einspeisung als Datenpunkte ergänzt (grid.buy_w / grid.sell_w) sowie Ampel-Status/Auslastung für schnelle Validierung."
       }
     }
   },
