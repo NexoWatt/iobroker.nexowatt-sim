@@ -148,6 +148,16 @@ class NexowattSimAdapter extends utils.Adapter {
             suite_json: '',
         };
 
+        // VIS/EMS closed-loop integration (optional)
+        this._vis = {
+            enabled: false,
+            instance: '',
+            systemAdapterId: '',
+            last_error: '',
+            last_sync_ms: 0,
+        };
+        this._visCache = new Map();
+
         this._model = null;
         this._cache = new Map(); // id -> last value for reducing updates
 
@@ -184,6 +194,13 @@ class NexowattSimAdapter extends utils.Adapter {
                 scenarioResetPauseSec: clamp(this.config.scenarioResetPauseSec ?? 15, 0, 600),
                 autoResetToBaseline: (this.config.autoResetToBaseline === undefined) ? true : !!this.config.autoResetToBaseline,
                 unitsAutoDetect: (this.config.unitsAutoDetect === undefined) ? true : !!this.config.unitsAutoDetect,
+
+                // VIS/EMS Integration (closed-loop tests)
+                visIntegrationEnabled: (this.config.visIntegrationEnabled === undefined) ? true : !!this.config.visIntegrationEnabled,
+                visInstanceId: (this.config.visInstanceId ?? '').toString().trim(),
+                visAutoDiscover: (this.config.visAutoDiscover === undefined) ? true : !!this.config.visAutoDiscover,
+                visSyncSettings: (this.config.visSyncSettings === undefined) ? true : !!this.config.visSyncSettings,
+                visSyncWallboxes: (this.config.visSyncWallboxes === undefined) ? true : !!this.config.visSyncWallboxes,
             };
 
             this._cfg = cfg;
@@ -198,6 +215,9 @@ class NexowattSimAdapter extends utils.Adapter {
 
             // Scenario catalog & defaults
             await this._initScenarioStates();
+
+            // VIS/EMS integration (optional, closed-loop testing)
+            await this._initVisIntegration(cfg);
 
             // Subscribe to commands and manual overrides
             await this.subscribeStatesAsync('*.ctrl.*');
@@ -1096,6 +1116,9 @@ class NexowattSimAdapter extends utils.Adapter {
             this._scenario.status = `applied ${id}`;
         }
 
+        // VIS closed-loop sync: mirror scenario inputs (modes/goals/settings) into the NexoWatt VIS states
+        await this._visApplyScenario(id, { start: doStart, nowMs });
+
         await this._publishScenarioStates();
     }
 
@@ -1119,6 +1142,264 @@ class NexowattSimAdapter extends utils.Adapter {
 
         await this._publishScenarioStates();
     }
+
+
+    // ---------------------------------------------------------------------
+    // VIS integration (Closed-loop Test Harness)
+    // ---------------------------------------------------------------------
+
+    async _initVisIntegration(cfg) {
+        this._vis.enabled = !!cfg.visIntegrationEnabled;
+        await this._setChanged('vis.status.enabled', this._vis.enabled);
+
+        if (!this._vis.enabled) return;
+
+        try {
+            await this._visDiscoverInstance();
+            await this._visUpdateStatus();
+        } catch (e) {
+            this._vis.last_error = e?.message || String(e);
+            this.log.warn(`[VIS] init failed: ${this._vis.last_error}`);
+            await this._setChanged('vis.status.last_error', this._vis.last_error);
+        }
+    }
+
+    _visNormalizeInstanceId(input) {
+        const s = (input || '').toString().trim();
+        if (!s) return { instance: '', systemAdapterId: '' };
+
+        // Accept both forms:
+        // - "system.adapter.nexowatt-vis.0"
+        // - "nexowatt-vis.0"
+        if (s.startsWith('system.adapter.')) {
+            return { systemAdapterId: s, instance: s.substring('system.adapter.'.length) };
+        }
+        if (s.includes('.')) {
+            return { instance: s, systemAdapterId: `system.adapter.${s}` };
+        }
+        // If only adapter name is given, assume instance .0
+        return { instance: `${s}.0`, systemAdapterId: `system.adapter.${s}.0` };
+    }
+
+    async _visDiscoverInstance() {
+        const cfg = this._cfg || {};
+        const requested = (cfg.visInstanceId || '').trim();
+        let pick = null;
+
+        if (requested) {
+            pick = this._visNormalizeInstanceId(requested);
+
+            // Verify existence (best-effort)
+            const obj = await this.getForeignObjectAsync(pick.systemAdapterId);
+            if (!obj) {
+                this.log.warn(`[VIS] Angegebene VIS Instanz nicht gefunden: ${pick.systemAdapterId}`);
+            }
+        } else if (cfg.visAutoDiscover) {
+            const objs = await this.getForeignObjectsAsync('system.adapter.nexowatt-vis.*');
+            const entries = Object.entries(objs || {});
+            const enabled = entries.filter(([id, obj]) => obj && obj.common && obj.common.enabled);
+            const sorted = (enabled.length ? enabled : entries).sort((a, b) => a[0].localeCompare(b[0]));
+
+            if (sorted.length) {
+                const id = sorted[0][0];
+                pick = { systemAdapterId: id, instance: id.substring('system.adapter.'.length) };
+            }
+        }
+
+        if (!pick || !pick.instance) {
+            this._vis.instance = '';
+            this._vis.systemAdapterId = '';
+            this._vis.last_error = 'Keine nexowatt-vis Instanz gefunden (Auto-Discovery).';
+            await this._setChanged('vis.status.instance', '');
+            await this._setChanged('vis.status.last_error', this._vis.last_error);
+            return;
+        }
+
+        this._vis.instance = pick.instance;
+        this._vis.systemAdapterId = pick.systemAdapterId;
+
+        await this._setChanged('vis.status.instance', this._vis.instance);
+        await this._setChanged('vis.status.last_error', '');
+
+        this.log.info(`[VIS] Using instance: ${this._vis.instance}`);
+    }
+
+    async _visUpdateStatus() {
+        if (!this._vis.enabled) return;
+
+        const vis = this._vis.instance;
+        if (!vis) {
+            await this._setChanged('vis.status.sim_active', false);
+            await this._setChanged('vis.status.sim_instance_match', false);
+            await this._setChanged('vis.status.charging_active', false);
+            await this._setChanged('vis.status.grid_connection_w_cfg', 0);
+            return;
+        }
+
+        try {
+            const simActiveSt = await this.getForeignStateAsync(`${vis}.simulation.active`);
+            const simInstSt = await this.getForeignStateAsync(`${vis}.simulation.instanceId`);
+
+            const simActive = !!(simActiveSt && simActiveSt.val);
+            const simInst = (simInstSt && simInstSt.val !== null && simInstSt.val !== undefined) ? String(simInstSt.val) : '';
+
+            const selfSys = `system.adapter.${this.namespace}`;
+            const simMatch =
+                simActive &&
+                (
+                    simInst === selfSys ||
+                    simInst === this._vis.systemAdapterId ||
+                    simInst.endsWith(`.${this.namespace}`)
+                );
+
+            const cmActiveSt = await this.getForeignStateAsync(`${vis}.chargingManagement.control.active`);
+            const cmActive = !!(cmActiveSt && cmActiveSt.val);
+
+            const gridConnSt = await this.getForeignStateAsync(`${vis}.ems.core.gridConnectionLimitW_cfg`);
+            const gridConn = (gridConnSt && gridConnSt.val !== null && gridConnSt.val !== undefined) ? Number(gridConnSt.val) : 0;
+
+            await this._setChanged('vis.status.sim_active', simActive);
+            await this._setChanged('vis.status.sim_instance_match', simMatch);
+            await this._setChanged('vis.status.charging_active', cmActive);
+            await this._setChanged('vis.status.grid_connection_w_cfg', Number.isFinite(gridConn) ? gridConn : 0);
+            await this._setChanged('vis.status.last_error', '');
+
+        } catch (e) {
+            this._vis.last_error = e?.message || String(e);
+            await this._setChanged('vis.status.last_error', this._vis.last_error);
+        }
+    }
+
+    async _visSetForeignChanged(id, val) {
+        if (!this._vis.enabled) return;
+        if (!id) return;
+
+        const key = id;
+        const prev = this._visCache.get(key);
+
+        // Primitive-only (booleans/numbers/strings)
+        if (prev === val) return;
+        this._visCache.set(key, val);
+
+        try {
+            await this.setForeignStateAsync(id, { val, ack: false });
+        } catch (e) {
+            // Foreign state might not exist (module disabled) – keep quiet but provide last error for visibility
+            this._vis.last_error = e?.message || String(e);
+            await this._setChanged('vis.status.last_error', this._vis.last_error);
+        }
+    }
+
+    async _visApplyScenario(scenarioId, { start, nowMs } = { start: false, nowMs: Date.now() }) {
+        if (!this._vis.enabled) return;
+        if (!this._cfg) return;
+
+        // Discover instance lazily
+        if (!this._vis.instance) {
+            await this._visDiscoverInstance();
+        }
+        const vis = this._vis.instance;
+        if (!vis) return;
+
+        const cfg = this._cfg;
+        const id = this._normalizeScenarioId(scenarioId);
+
+        // -----------------------------------------------------------------
+        // 1) Global settings (Tarif, StorageControl, etc.)
+        // -----------------------------------------------------------------
+        if (cfg.visSyncSettings) {
+            // Safe defaults that make the internal logic actually do something.
+            const evcsMaxW = Math.round((cfg.gridLimitKw || 40) * 1000);
+            const storagePowerW = Math.round(Math.max(cfg.storageMaxDischargeKw || 0, cfg.storageMaxChargeKw || 0) * 1000);
+
+            let dynamicTariff = true;
+            let tariffMode = 2; // 1=Manuell, 2=Automatik (Provider/Forecast)
+            let manualPriceCt = 25;
+
+            if (id === 'tariff_flat_low_10ct') {
+                dynamicTariff = true;
+                tariffMode = 1;
+                manualPriceCt = 10;
+            }
+
+            await this._visSetForeignChanged(`${vis}.settings.dynamicTariff`, dynamicTariff);
+            await this._visSetForeignChanged(`${vis}.settings.tariffMode`, tariffMode);
+            await this._visSetForeignChanged(`${vis}.settings.price`, manualPriceCt);
+            await this._visSetForeignChanged(`${vis}.settings.priority`, 2);
+            await this._visSetForeignChanged(`${vis}.settings.storagePower`, storagePowerW);
+            await this._visSetForeignChanged(`${vis}.settings.evcsMaxPower`, evcsMaxW);
+        }
+
+        // -----------------------------------------------------------------
+        // 2) Wallbox goals / modes (so the VIS charging-management logic has tasks)
+        // -----------------------------------------------------------------
+        if (cfg.visSyncWallboxes && this._model && this._model.evcs && Array.isArray(this._model.evcs.chargers)) {
+            const now = nowMs || Date.now();
+            const durMs = clamp((this._scenario && this._scenario.duration_s ? this._scenario.duration_s : cfg.scenarioDurationSec) * 1000, 30000, 24 * 3600 * 1000);
+            const finishTsDefault = now + Math.max(90 * 1000, durMs - 60 * 1000);
+
+            // Scenario-derived userMode
+            let userMode = 'auto';
+            if (id.startsWith('pv_')) userMode = 'pv';
+
+            // Disable goals for a small set of scenarios where we explicitly want "clean slate"
+            const disableGoals = (id === 'baseline' || id === 'faults_clear_all');
+
+            // Determine how many wallboxes VIS expects (best-effort)
+            let visCount = this._model.evcs.chargers.length;
+            try {
+                const st = await this.getForeignStateAsync(`${vis}.installer.chargepointsCount`);
+                const n = st && st.val !== null && st.val !== undefined ? Number(st.val) : NaN;
+                if (Number.isFinite(n) && n > 0) visCount = Math.min(visCount, Math.floor(n));
+            } catch (_) {
+                // ignore
+            }
+
+            for (let i = 0; i < visCount; i++) {
+                const ch = this._model.evcs.chargers[i];
+                const lp = `lp${i + 1}`;
+                const base = `${vis}.chargingManagement.wallboxes.${lp}`;
+
+                const plugged = !!(ch && ch.ctrl && ch.ctrl.plugged);
+                const enabled = !!(ch && ch.ctrl && ch.ctrl.enabled);
+                const prio = (ch && ch.ctrl && typeof ch.ctrl.priority === 'number') ? ch.ctrl.priority : 5;
+                const capKwh = (ch && ch.vehicle && typeof ch.vehicle.capacity_kwh === 'number') ? ch.vehicle.capacity_kwh : 60;
+                const tgtSoc = (ch && ch.vehicle && typeof ch.vehicle.target_soc_pct === 'number') ? ch.vehicle.target_soc_pct : 100;
+
+                // Base toggles
+                await this._visSetForeignChanged(`${base}.userEnabled`, plugged ? enabled : false);
+                await this._visSetForeignChanged(`${base}.regEnabled`, true);
+                await this._visSetForeignChanged(`${base}.priority`, prio);
+                await this._visSetForeignChanged(`${base}.userMode`, userMode);
+
+                // Enable goals for most charging-related scenarios; this ensures targetPowerW becomes non-zero.
+                const goalEnableEff =
+                    !disableGoals &&
+                    plugged &&
+                    (
+                        id.startsWith('lm_') ||
+                        id.startsWith('pv_') ||
+                        id.startsWith('tariff_') ||
+                        id.startsWith('dc_')
+                    );
+
+                await this._visSetForeignChanged(`${base}.goalEnabled`, goalEnableEff);
+
+                if (goalEnableEff) {
+                    await this._visSetForeignChanged(`${base}.goalTargetSocPct`, clamp(tgtSoc, 50, 100));
+                    await this._visSetForeignChanged(`${base}.goalBatteryKwh`, clamp(capKwh, 10, 1000));
+                    await this._visSetForeignChanged(`${base}.goalFinishTs`, finishTsDefault);
+                }
+            }
+        }
+
+        this._vis.last_sync_ms = nowMs || Date.now();
+        await this._setChanged('vis.status.last_sync', new Date(this._vis.last_sync_ms).toISOString());
+
+        // Update status snapshot (simulation mode, CM active, etc.)
+        await this._visUpdateStatus();
+    }
+
 
     // ---------------------------------------------------------------------
     // Test report / write tracking
@@ -2590,6 +2871,17 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureChannel('scenario.buttons', 'Schnell-Buttons');
         await this._ensureChannel('scenario.suite', 'Test-Suite');
         await this._ensureChannel('report', 'Test-Report');
+        await this._ensureChannel('vis', 'VIS/EMS Integration');
+        await this._ensureChannel('vis.status', 'Status');
+
+        await this._ensureState('vis.status.enabled', { type: 'boolean', role: 'indicator', read: true, write: false, def: false, name: 'VIS Integration aktiv' });
+        await this._ensureState('vis.status.instance', { type: 'string', role: 'text', read: true, write: false, def: '', name: 'VIS Instanz' });
+        await this._ensureState('vis.status.sim_active', { type: 'boolean', role: 'indicator', read: true, write: false, def: false, name: 'VIS Simulation aktiv' });
+        await this._ensureState('vis.status.sim_instance_match', { type: 'boolean', role: 'indicator', read: true, write: false, def: false, name: 'Simulation-Instanz passt' });
+        await this._ensureState('vis.status.charging_active', { type: 'boolean', role: 'indicator', read: true, write: false, def: false, name: 'Charging-Management aktiv' });
+        await this._ensureState('vis.status.grid_connection_w_cfg', { type: 'number', role: 'value.power', read: true, write: false, def: 0, unit: 'W', name: 'Netzanschluss (Cfg)' });
+        await this._ensureState('vis.status.last_sync', { type: 'string', role: 'text', read: true, write: false, def: '', name: 'Letzte VIS-Synchronisierung' });
+        await this._ensureState('vis.status.last_error', { type: 'string', role: 'text', read: true, write: false, def: '', name: 'Letzter VIS-Fehler' });
 
         // One-time migration marker (prevents repeating migrations on restart)
         await this._ensureState('info.migration_done', { type: 'boolean', role: 'indicator', read: true, write: false, def: false, name: 'Migration durchgeführt (intern)' });
