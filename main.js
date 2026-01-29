@@ -1519,6 +1519,18 @@ class NexowattSimAdapter extends utils.Adapter {
         const started = this._report.started_ms || 0;
         const elapsed = started ? ((nowMs - started) / 1000) : 0;
 
+        const toW = (kw) => Math.round((Number(kw) || 0) * 1000);
+        const nvp = this._model?.grid?.nvp || {};
+        const gridNetW = toW(this._model?.grid?.power_kw || 0);
+        const buyW = Math.max(0, gridNetW);
+        const sellW = Math.max(0, -gridNetW);
+        const evcsActive = (this._model?.evcs?.chargers || []).reduce((acc, ch) => {
+            const plugged = !!(ch?.ctrl?.plugged);
+            const enabled = !!(ch?.ctrl?.enabled);
+            const p = Number(ch?.meas?.power_kw) || 0;
+            return acc + ((plugged && enabled && p > 0.01) ? 1 : 0);
+        }, 0);
+
         return {
             scenario: {
                 id,
@@ -1536,6 +1548,37 @@ class NexowattSimAdapter extends utils.Adapter {
                 index: this._suite.index,
                 total: this._suite.queue?.length || 0,
             } : null,
+            snapshot: {
+                nvp: {
+                    net_w: gridNetW,
+                    buy_w: buyW,
+                    sell_w: sellW,
+                    verbrauch_w: toW(nvp.verbrauch_kw),
+                    ladestation_w: toW(nvp.ladestation_kw),
+                    pv_w: toW(nvp.pv_kw),
+                    production_w: toW(nvp.production_kw),
+                    producer_w: toW(nvp.producer_kw),
+                    storage_signed_w: toW(nvp.storage_signed_kw),
+                    storage_charge_w: toW(nvp.storage_charge_kw),
+                    storage_discharge_w: toW(nvp.storage_discharge_kw),
+                    formula_net_w: toW(nvp.formula_net_kw),
+                },
+                grid: {
+                    limit_kw: this._model?.grid?.limit_kw ?? null,
+                    available: this._model?.grid?.available ?? null,
+                },
+                evcs: {
+                    active_count: evcsActive,
+                    total_power_w: toW(nvp.ladestation_kw),
+                },
+                storage: {
+                    soc_pct: this._model?.storage?.soc_pct ?? null,
+                    power_w: toW(this._model?.storage?.power_kw),
+                },
+                pv: {
+                    power_w: toW(this._model?.pv?.power_kw),
+                },
+            },
         };
     }
 
@@ -2907,6 +2950,8 @@ class NexowattSimAdapter extends utils.Adapter {
         // Root channels
         await this._ensureChannel('info', 'Info');
         await this._ensureChannel('grid', 'Grid');
+        await this._ensureChannel('grid.nvp', 'NVP (Netzverknüpfungspunkt)');
+        await this._ensureChannel('grid.nvp.components', 'NVP Komponenten');
         await this._ensureChannel('pv', 'PV');
         await this._ensureChannel('pv.override', 'PV Override');
         await this._ensureChannel('storage', 'Storage');
@@ -2955,6 +3000,21 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._ensureState('grid.ampel_text', { type: 'string', role: 'text', read: true, write: false, def: '', name: 'Ampel Details' });
 
         await this._ensureState('grid.over_limit', { type: 'boolean', role: 'indicator.alarm', read: true, write: false, def: false });
+
+        // NVP Debug/Diagnose (Watt) – hilft beim Abgleich: Verbrauch + Ladestation - PV - Entladung + Beladung
+        await this._ensureState('grid.nvp.net_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'NVP Netto (W) (+Bezug / -Einspeisung)' });
+        await this._ensureState('grid.nvp.buy_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'NVP Bezug (W)' });
+        await this._ensureState('grid.nvp.sell_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'NVP Einspeisung (W)' });
+        await this._ensureState('grid.nvp.formula_net_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'NVP (Formel) Netto (W)' });
+        await this._ensureState('grid.nvp.formula_error_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'NVP Fehler (Formel - Netto) (W)' });
+
+        await this._ensureState('grid.nvp.components.verbrauch_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Verbrauch (ohne EVCS) (W)' });
+        await this._ensureState('grid.nvp.components.ladestation_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Ladestation Gesamt (W)' });
+        await this._ensureState('grid.nvp.components.pv_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'PV Leistung (W)' });
+        await this._ensureState('grid.nvp.components.producer_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Erzeuger (BHKW+Gen) (W)' });
+        await this._ensureState('grid.nvp.components.storage_signed_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Speicher Leistung (W) (+Entladung / -Beladung)' });
+        await this._ensureState('grid.nvp.components.storage_charge_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Speicher Beladung (W)' });
+        await this._ensureState('grid.nvp.components.storage_discharge_w', { type: 'number', role: 'value.power', unit: 'W', read: true, write: false, def: 0, name: 'Speicher Entladung (W)' });
 
         // Tariff
         await this._ensureState('tariff.mode', { type: 'string', role: 'text', read: true, write: true, def: 'auto' });
@@ -3402,6 +3462,34 @@ class NexowattSimAdapter extends utils.Adapter {
         this._model.grid.power_kw = gridPower;
         this._model.grid.over_limit = this._model.grid.available && (gridPower > this._model.grid.limit_kw + 1e-6);
 
+        // NVP (Netzverknüpfungspunkt) – Debug: Werte für sauberen Abgleich in der VIS
+        // Formel: NVP = Verbrauch + Ladestation - PV - SpeicherEntladung + SpeicherBeladung
+        // (mit storage.power_kw: +Entladung / -Beladung => "-storage" entspricht -Entladung + Beladung)
+        const verbrauchKw = baseLoad + (Number(this._model.heatpump.power_kw) || 0);
+        const ladestationKw = evTotalPower;
+        const pvKw = Number(this._model.pv.power_kw) || 0;
+        const chpKw = Number(this._model.chp.power_kw) || 0;
+        const genKw = Number(this._model.generator.power_kw) || 0;
+        const prodKw = pvKw + chpKw + genKw;
+        const storageSignedKw = Number(this._model.storage.power_kw) || 0; // +Entladung / -Beladung
+        const storageDischargeKw = Math.max(0, storageSignedKw);
+        const storageChargeKw = Math.max(0, -storageSignedKw);
+
+        const formulaNetKw = (verbrauchKw + ladestationKw) - prodKw - storageSignedKw;
+        this._model.grid.base_load_eff_kw = baseLoad;
+        this._model.grid.nvp = {
+            verbrauch_kw: verbrauchKw,
+            ladestation_kw: ladestationKw,
+            pv_kw: pvKw,
+            chp_kw: chpKw,
+            generator_kw: genKw,
+            production_kw: prodKw,
+            storage_signed_kw: storageSignedKw,
+            storage_discharge_kw: storageDischargeKw,
+            storage_charge_kw: storageChargeKw,
+            formula_net_kw: formulaNetKw,
+        };
+
         // Publish states (reduced churn)
         await this._publish(now);
         await this._publishAggregates(evTotalPower, evTotalEnergy);
@@ -3497,6 +3585,38 @@ class NexowattSimAdapter extends utils.Adapter {
         await this._setChanged('grid.ampel_code', ampelCode);
         await this._setChanged('grid.ampel_text', ampelText);
         await this._setChanged('grid.over_limit', this._model.grid.over_limit);
+
+        // NVP Debug/Diagnose (W)
+        const nvp = this._model.grid.nvp || {};
+        const nvpNetW = netW;
+        const nvpBuyW = buyW;
+        const nvpSellW = sellW;
+
+        const verbrauchW = Math.round((Number(nvp.verbrauch_kw) || 0) * 1000);
+        const ladestationW = Math.round((Number(nvp.ladestation_kw) || 0) * 1000);
+        const pvW = Math.round((Number(nvp.pv_kw) || 0) * 1000);
+        const producerW = Math.round((Number(nvp.producer_kw) || 0) * 1000);
+        const productionW = Math.round((Number(nvp.production_kw) || 0) * 1000);
+        const storageSignedW = Math.round((Number(nvp.storage_signed_kw) || 0) * 1000);
+        const storageChargeW = Math.round((Number(nvp.storage_charge_kw) || 0) * 1000);
+        const storageDischargeW = Math.round((Number(nvp.storage_discharge_kw) || 0) * 1000);
+
+        const formulaNetW = Math.round((Number(nvp.formula_net_kw) || 0) * 1000);
+        const formulaErrorW = formulaNetW - nvpNetW;
+
+        await this._setChanged('grid.nvp.net_w', nvpNetW);
+        await this._setChanged('grid.nvp.buy_w', nvpBuyW);
+        await this._setChanged('grid.nvp.sell_w', nvpSellW);
+        await this._setChanged('grid.nvp.formula_net_w', formulaNetW);
+        await this._setChanged('grid.nvp.formula_error_w', formulaErrorW);
+        await this._setChanged('grid.nvp.components.verbrauch_w', verbrauchW);
+        await this._setChanged('grid.nvp.components.ladestation_w', ladestationW);
+        await this._setChanged('grid.nvp.components.pv_w', pvW);
+        await this._setChanged('grid.nvp.components.producer_w', producerW);
+        await this._setChanged('grid.nvp.components.production_w', productionW);
+        await this._setChanged('grid.nvp.components.storage_signed_w', storageSignedW);
+        await this._setChanged('grid.nvp.components.storage_charge_w', storageChargeW);
+        await this._setChanged('grid.nvp.components.storage_discharge_w', storageDischargeW);
 
         // Tariff
         await this._setChanged('tariff.mode', this._model.tariff.mode);

@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "nexowatt-sim",
-    "version": "0.6.1",
+  "version": "0.6.2",
     "title": "NexoWatt EMS Simulator",
     "titleLang": {
       "en": "NexoWatt EMS Simulator",
